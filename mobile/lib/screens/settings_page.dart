@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../services/api_service.dart';
 
@@ -62,6 +63,83 @@ class _SettingsPageState extends State<SettingsPage> {
       setState(() => allowedNumbers.add(normalized));
     }
     newAllowedNumber.clear();
+  }
+
+  Future<void> openLink(String value) async {
+    final uri = Uri.parse(value);
+    try {
+      final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!opened && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No se pudo abrir el enlace.')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('No se pudo abrir Twilio: $e')),
+        );
+      }
+    }
+  }
+
+  Widget twilioTools() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.open_in_new),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Herramientas de Twilio',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Puedes entrar a Twilio desde WhatsBot para comprar o gestionar el número y completar la configuración de WhatsApp.',
+            ),
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                FilledButton.icon(
+                  onPressed: () => openLink('https://console.twilio.com/'),
+                  icon: const Icon(Icons.login),
+                  label: const Text('Abrir Twilio'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => openLink(
+                    'https://console.twilio.com/us1/develop/phone-numbers/manage/incoming',
+                  ),
+                  icon: const Icon(Icons.dialpad_outlined),
+                  label: const Text('Mis números'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => openLink(
+                    'https://www.twilio.com/docs/whatsapp/self-sign-up',
+                  ),
+                  icon: const Icon(Icons.chat_outlined),
+                  label: const Text('Configurar WhatsApp'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'En la consola de Twilio: Messaging → Senders → WhatsApp Senders.',
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> save() async {
@@ -226,6 +304,10 @@ class _SettingsPageState extends State<SettingsPage> {
                       ],
                       onChanged: (v) => setState(() => provider = v ?? provider),
                     ),
+                    if (provider == 'twilio') ...[
+                      const SizedBox(height: 14),
+                      twilioTools(),
+                    ],
                     const SizedBox(height: 14),
                     TextField(
                       controller: botNumber,
