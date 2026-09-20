@@ -21,10 +21,10 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
-
       - name: Install Android NDK
-        run: yes | sdkmanager "ndk;${NDK_VERSION}" || sdkmanager "ndk;${NDK_VERSION}"
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "ndk;${NDK_VERSION}"
 
       - uses: subosito/flutter-action@v2
         with:
