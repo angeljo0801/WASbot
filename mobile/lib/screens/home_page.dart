@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../models/note.dart';
 import '../services/api_service.dart';
 import '../services/local_ai_service.dart';
+import 'ai_settings_page.dart';
 import 'new_note_page.dart';
 import 'note_detail_page.dart';
 import 'settings_page.dart';
@@ -167,18 +168,28 @@ class _HomePageState extends State<HomePage> {
         title: const Text('WhatsBot'),
         actions: [
           IconButton(
-            tooltip: 'Procesar con IA local',
-            onPressed: localAiRunning ? null : () => _processPendingLocal(force: true),
-            icon: localAiRunning
-                ? const SizedBox.square(dimension: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.psychology_outlined),
+            tooltip: 'Inteligencia artificial',
+            onPressed: () async {
+              await Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => AiSettingsPage(
+                    api: api,
+                    localAi: localAi,
+                    onProcessNow: () => _processPendingLocal(force: true),
+                  ),
+                ),
+              );
+              if (mounted) refresh();
+            },
+            icon: const Icon(Icons.psychology_outlined),
           ),
           IconButton(
             tooltip: 'Configuración',
             onPressed: () async {
               await Navigator.push(
                 context,
-                MaterialPageRoute(builder: (_) => SettingsPage(api: api, localAi: localAi)),
+                MaterialPageRoute(builder: (_) => SettingsPage(api: api)),
               );
               if (mounted) refresh();
             },
