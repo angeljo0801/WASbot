@@ -35,7 +35,9 @@ jobs:
 
       - name: Generate Android platform files
         working-directory: mobile
-        run: flutter create . --platforms=android --org com.whatsbot --project-name whatsbot
+        run: |
+          flutter create . --platforms=android --org com.whatsbot --project-name whatsbot
+          rm -f test/widget_test.dart
 
       - name: Configure Android for local llama.cpp
         working-directory: mobile
