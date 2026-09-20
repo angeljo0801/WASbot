@@ -32,7 +32,7 @@ class _NewNotePageState extends State<NewNotePage> {
     body: ListView(padding: const EdgeInsets.all(20), children: [
       TextField(controller: title, decoration: const InputDecoration(labelText: 'Título', border: OutlineInputBorder())),
       const SizedBox(height: 14),
-      DropdownButtonFormField<String>(value: category, items: categories.map((x)=>DropdownMenuItem(value:x,child:Text(x))).toList(), onChanged:(v)=>setState(()=>category=v??category), decoration: const InputDecoration(labelText:'Categoría',border:OutlineInputBorder())),
+      DropdownButtonFormField<String>(initialValue: category, items: categories.map((x)=>DropdownMenuItem(value:x,child:Text(x))).toList(), onChanged:(v)=>setState(()=>category=v??category), decoration: const InputDecoration(labelText:'Categoría',border:OutlineInputBorder())),
       const SizedBox(height: 14),
       TextField(controller: content, minLines: 6, maxLines: 14, decoration: const InputDecoration(labelText: 'Contenido', alignLabelWithHint: true, border: OutlineInputBorder())),
       const SizedBox(height: 18),
