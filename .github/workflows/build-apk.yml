@@ -51,6 +51,52 @@ jobs:
           p.write_text(s)
           PY
 
+      - name: Add WhatsBot launcher icon
+        working-directory: mobile
+        run: |
+          mkdir -p android/app/src/main/res/drawable
+          mkdir -p android/app/src/main/res/mipmap-anydpi-v26
+          cat > android/app/src/main/res/values/whatsbot_colors.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="whatsbot_blue">#2563EB</color>
+          </resources>
+          EOF
+          cat > android/app/src/main/res/drawable/ic_whatsbot_foreground.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:pathData="M54,13 C31,13 14,29 14,50 C14,61 18,71 27,79 L23,95 L40,87 C45,89 49,90 54,90 C77,90 94,73 94,50 C94,29 77,13 54,13 Z"
+                  android:fillColor="@android:color/transparent"
+                  android:strokeColor="#FFFFFFFF"
+                  android:strokeWidth="4.5"
+                  android:strokeLineJoin="round"/>
+              <path
+                  android:fillColor="#FFFFFFFF"
+                  android:fillType="evenOdd"
+                  android:pathData="M36,27 L53,27 C66,27 73,33 73,42 C73,49 69,53 63,55 C72,57 77,63 77,71 C77,82 68,88 53,88 L36,88 Z M47,37 L47,51 L52,51 C59,51 62,48 62,44 C62,39 59,37 52,37 Z M47,61 L47,78 L53,78 C61,78 66,75 66,69 C66,64 61,61 53,61 Z"/>
+          </vector>
+          EOF
+          cat > android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/whatsbot_blue"/>
+              <foreground android:drawable="@drawable/ic_whatsbot_foreground"/>
+          </adaptive-icon>
+          EOF
+          cp android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+          python - <<'PY'
+          from pathlib import Path
+          m = Path('android/app/src/main/AndroidManifest.xml')
+          s = m.read_text()
+          s = s.replace('android:label="whatsbot"', 'android:label="WhatsBot"')
+          m.write_text(s)
+          PY
+
       - name: Get packages
         working-directory: mobile
         run: flutter pub get
