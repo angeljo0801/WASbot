@@ -3,7 +3,8 @@
 Checked: 2026-09-20
 
 - App: **WhatsBot / WASbot**
-- Latest APK artifact currently stored in the Library: **v0.3**
 - Repository source version: **0.6.0+7**
-- **The repository is ahead of the stored APK. Do not downgrade it to v0.3.**
-- Next APK should be rebuilt from the current 0.6.0 source.
+- Latest successful GitHub Actions run: **35489431925**
+- Artifact: **WhatsBot-release-apk**
+- Artifact size: **11,248,022 bytes**
+- The repository is newer than the old v0.3 Library APK. Do not downgrade it.
