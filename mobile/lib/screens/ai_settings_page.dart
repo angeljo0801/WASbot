@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../services/ai_provider_service.dart';
 import '../services/api_service.dart';
+import '../services/embedding_service.dart';
 import '../services/local_ai_service.dart';
 
 class AiSettingsPage extends StatefulWidget {
@@ -25,6 +26,7 @@ class AiSettingsPage extends StatefulWidget {
 
 class _AiSettingsPageState extends State<AiSettingsPage> {
   late final AiProviderService ai;
+  late final EmbeddingService embeddings;
 
   String provider = AiProvider.openai;
   String modelPath = '';
@@ -33,6 +35,9 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   bool saving = false;
   bool testing = false;
   bool processing = false;
+  bool embeddingReady = false;
+  bool embeddingDownloading = false;
+  double embeddingProgress = 0;
   String? status;
 
   final openAiUrl = TextEditingController();
@@ -48,6 +53,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   void initState() {
     super.initState();
     ai = AiProviderService(localAi: widget.localAi);
+    embeddings = EmbeddingService();
     load();
   }
 
@@ -65,7 +71,12 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   }
 
   Future<void> load() async {
-    final s = await ai.settings();
+    final values = await Future.wait([
+      ai.settings(),
+      embeddings.isReady(),
+    ]);
+    final s = values[0] as AiProviderSettings;
+    final ready = values[1] as bool;
     if (!mounted) return;
     setState(() {
       provider = s.provider;
@@ -79,6 +90,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
       localUrl.text = s.localBaseUrl;
       localModel.text = s.localModel;
       localKey.text = s.localKey;
+      embeddingReady = ready;
       loading = false;
     });
   }
@@ -159,6 +171,46 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
       if (mounted) setState(() => status = 'Error: ' + e.toString());
     } finally {
       if (mounted) setState(() => testing = false);
+    }
+  }
+
+  Future<void> downloadEmbeddingModel() async {
+    if (embeddingDownloading) return;
+    setState(() {
+      embeddingDownloading = true;
+      embeddingProgress = 0;
+      status = 'Preparando memoria semántica…';
+    });
+    try {
+      await embeddings.downloadModel(
+        onProgress: (progress) {
+          if (mounted) {
+            setState(() => embeddingProgress = progress.fraction);
+          }
+        },
+      );
+      final notes = await widget.api.getNotes();
+      await embeddings.indexAll(
+        notes,
+        onProgress: (done, total) {
+          if (mounted && total > 0) {
+            setState(() => embeddingProgress = done / total);
+          }
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        embeddingReady = true;
+        embeddingProgress = 1;
+        status =
+            'Memoria semántica lista. Las notas nuevas se indexarán automáticamente.';
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() => status = 'No se pudo preparar embeddings: $e');
+      }
+    } finally {
+      if (mounted) setState(() => embeddingDownloading = false);
     }
   }
 
@@ -400,6 +452,68 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                         ),
                       ),
                     ],
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(Icons.memory_outlined),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    'Memoria semántica',
+                                    style: Theme.of(context).textTheme.titleMedium,
+                                  ),
+                                ),
+                                Chip(
+                                  label: Text(
+                                    embeddingReady ? 'Lista' : 'No descargada',
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            const Text(
+                              'Usa un modelo multilingüe pequeño de embeddings para indexar automáticamente tus notas y permitir búsquedas por significado en el chat.',
+                            ),
+                            const SizedBox(height: 8),
+                            const Text(
+                              'Se descarga una sola vez y trabaja localmente en el teléfono. La primera descarga ronda los 470 MB.',
+                              style: TextStyle(fontSize: 12),
+                            ),
+                            if (embeddingDownloading) ...[
+                              const SizedBox(height: 12),
+                              LinearProgressIndicator(
+                                value: embeddingProgress > 0 &&
+                                        embeddingProgress < 1
+                                    ? embeddingProgress
+                                    : null,
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                '${(embeddingProgress * 100).round()}%',
+                              ),
+                            ],
+                            const SizedBox(height: 12),
+                            OutlinedButton.icon(
+                              onPressed: embeddingDownloading
+                                  ? null
+                                  : downloadEmbeddingModel,
+                              icon: const Icon(Icons.download_outlined),
+                              label: Text(
+                                embeddingReady
+                                    ? 'Revisar / reindexar'
+                                    : 'Descargar modelo de embeddings',
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
                     if (provider != AiProvider.rules) ...[
                       const SizedBox(height: 12),
                       SwitchListTile(
