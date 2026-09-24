@@ -40,6 +40,10 @@ class PaqueteriaPurchaseSyncService {
     required List<String> photoPaths,
     String store = 'WhatsBot',
     double total = 0,
+    String orderNumber = '',
+    List<Map<String, dynamic>> items = const <Map<String, dynamic>>[],
+    String ocrText = '',
+    Map<String, dynamic> ocrMeta = const <String, dynamic>{},
     DateTime? createdAt,
   }) async {
     final queue = await _queue();
@@ -51,6 +55,10 @@ class PaqueteriaPurchaseSyncService {
       'description': description.trim(),
       'store': store.trim().isEmpty ? 'WhatsBot' : store.trim(),
       'total': total,
+      'order_number': orderNumber.trim(),
+      'items': items,
+      'ocr_text': ocrText,
+      'ocr_meta': ocrMeta,
       'photo_paths': photoPaths,
       'created_at': (createdAt ?? DateTime.now()).toUtc().toIso8601String(),
     };
@@ -100,6 +108,10 @@ class PaqueteriaPurchaseSyncService {
           'description': item['description'],
           'store': item['store'],
           'total': item['total'],
+          'order_number': item['order_number'] ?? '',
+          'items': item['items'] ?? const <Map<String, dynamic>>[],
+          'ocr_text': item['ocr_text'] ?? '',
+          'ocr_meta': item['ocr_meta'] ?? const <String, dynamic>{},
           'created_at': item['created_at'],
           'photos': photos,
         };
