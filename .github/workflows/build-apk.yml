@@ -18,7 +18,7 @@ jobs:
   android:
     runs-on: ubuntu-latest
     env:
-      NDK_VERSION: 27.0.12077973
+      NDK_VERSION: 28.2.13676358
       WHATSBOT_APPLICATION_ID: com.whatsbot.whatsbot
 
     steps:
@@ -85,7 +85,7 @@ jobs:
           p = Path('android/app/build.gradle.kts')
           s = p.read_text()
           s = s.replace('minSdk = flutter.minSdkVersion', 'minSdk = 35')
-          s = s.replace('ndkVersion = flutter.ndkVersion', 'ndkVersion = "27.0.12077973"')
+          s = s.replace('ndkVersion = flutter.ndkVersion', 'ndkVersion = "28.2.13676358"')
           s = re.sub(r'namespace\s*=\s*"[^"]+"', 'namespace = "com.whatsbot.whatsbot"', s, count=1)
           s = re.sub(r'applicationId\s*=\s*"[^"]+"', 'applicationId = "com.whatsbot.whatsbot"', s, count=1)
 
@@ -113,6 +113,15 @@ jobs:
               'signingConfig = signingConfigs.getByName("debug")',
               'signingConfig = signingConfigs.getByName("whatsBotRelease")'
           )
+          if 'isMinifyEnabled = false' not in s:
+              s, n = re.subn(
+                  r'(release\s*\{)',
+                  r'\1\n            isMinifyEnabled = false\n            isShrinkResources = false',
+                  s,
+                  count=1,
+              )
+              if n != 1:
+                  raise SystemExit('Could not patch release minify settings')
           p.write_text(s)
 
           manifest = Path('android/app/src/main/AndroidManifest.xml')
