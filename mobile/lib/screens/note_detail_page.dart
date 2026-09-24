@@ -29,6 +29,7 @@ class NoteDetailPage extends StatefulWidget {
 class _NoteDetailPageState extends State<NoteDetailPage> {
   static const categories = [
     'Inbox',
+    'Clientes',
     'Trabajo',
     'Personal',
     'Compras',
