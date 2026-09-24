@@ -34,6 +34,7 @@ class _HomePageState extends State<HomePage> {
   bool localAiRunning = false;
   int localAiDone = 0;
   int localAiTotal = 0;
+  int paqueteriaPending = 0;
   String? error;
 
   @override
@@ -62,7 +63,12 @@ class _HomePageState extends State<HomePage> {
       if (mounted) setState(() => loading = false);
     }
     if (error == null) {
-      unawaited(PaqueteriaPurchaseSyncService(api).flush());
+      final sync = PaqueteriaPurchaseSyncService(api);
+      unawaited(() async {
+        await sync.flush();
+        final pending = await sync.pendingCount();
+        if (mounted) setState(() => paqueteriaPending = pending);
+      }());
     }
     if (runLocalAi && error == null) unawaited(_processPendingLocal());
   }
@@ -225,6 +231,24 @@ class _HomePageState extends State<HomePage> {
           children: [
             Text('Tu bandeja personal desde WhatsApp', style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 8),
+            if (paqueteriaPending > 0)
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.sync_problem_outlined),
+                  title: Text(
+                    paqueteriaPending.toString() +
+                        ' compra(s) pendientes de sincronizar con Paquetería',
+                  ),
+                  subtitle: const Text(
+                    'WhatsBot las conserva localmente y volverá a intentarlo automáticamente.',
+                  ),
+                  trailing: IconButton(
+                    tooltip: 'Reintentar',
+                    onPressed: refresh,
+                    icon: const Icon(Icons.refresh),
+                  ),
+                ),
+              ),
             if (localAiRunning)
               Card(
                 child: Padding(
