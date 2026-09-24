@@ -129,6 +129,20 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO config(key, value) VALUES (?, ?)",
                 (key, value),
             )
+        purchase_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(purchase_sync)").fetchall()
+        }
+        purchase_migrations = {
+            "order_number": "TEXT NOT NULL DEFAULT ''",
+            "items_json": "TEXT NOT NULL DEFAULT '[]'",
+            "ocr_text": "TEXT NOT NULL DEFAULT ''",
+            "ocr_meta_json": "TEXT NOT NULL DEFAULT '{}'",
+        }
+        for column, definition in purchase_migrations.items():
+            if column not in purchase_columns:
+                conn.execute(
+                    f"ALTER TABLE purchase_sync ADD COLUMN {column} {definition}"
+                )
         conn.commit()
 
 
@@ -556,6 +570,10 @@ class PurchaseSyncCreate(BaseModel):
     description: str = ""
     store: str = "WhatsBot"
     total: float = 0
+    order_number: str = ""
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    ocr_text: str = ""
+    ocr_meta: dict[str, Any] = Field(default_factory=dict)
     photos: list[PurchasePhoto] = Field(default_factory=list)
     created_at: str = ""
 
@@ -781,6 +799,14 @@ def purchase_row(row: sqlite3.Row) -> dict[str, Any]:
         files = json.loads(row["photo_files"] or "[]")
     except Exception:
         files = []
+    try:
+        items = json.loads(row["items_json"] or "[]")
+    except Exception:
+        items = []
+    try:
+        ocr_meta = json.loads(row["ocr_meta_json"] or "{}")
+    except Exception:
+        ocr_meta = {}
     return {
         "id": row["id"],
         "external_id": row["external_id"],
@@ -790,6 +816,10 @@ def purchase_row(row: sqlite3.Row) -> dict[str, Any]:
         "description": row["description"],
         "store": row["store"],
         "total": row["total"],
+        "order_number": row["order_number"],
+        "items": items,
+        "ocr_text": row["ocr_text"],
+        "ocr_meta": ocr_meta,
         "photo_urls": [
             f"/api/purchases/{row['id']}/photos/{i}" for i in range(len(files))
         ],
@@ -845,6 +875,10 @@ def create_or_update_purchase(payload: PurchaseSyncCreate) -> dict[str, Any]:
             payload.description.strip(),
             payload.store.strip() or "WhatsBot",
             float(payload.total or 0),
+            payload.order_number.strip(),
+            json.dumps(payload.items, ensure_ascii=False),
+            payload.ocr_text,
+            json.dumps(payload.ocr_meta, ensure_ascii=False),
             json.dumps(new_files),
             payload.created_at.strip() or (existing["created_at"] if existing else now),
             now,
@@ -855,7 +889,8 @@ def create_or_update_purchase(payload: PurchaseSyncCreate) -> dict[str, Any]:
                 """
                 UPDATE purchase_sync
                 SET customer_name=?, customer_phone=?, title=?, description=?,
-                    store=?, total=?, photo_files=?, created_at=?, updated_at=?
+                    store=?, total=?, order_number=?, items_json=?, ocr_text=?,
+                    ocr_meta_json=?, photo_files=?, created_at=?, updated_at=?
                 WHERE external_id=?
                 """,
                 values,
@@ -865,8 +900,9 @@ def create_or_update_purchase(payload: PurchaseSyncCreate) -> dict[str, Any]:
                 """
                 INSERT INTO purchase_sync(
                     customer_name, customer_phone, title, description, store,
-                    total, photo_files, created_at, updated_at, external_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    total, order_number, items_json, ocr_text, ocr_meta_json,
+                    photo_files, created_at, updated_at, external_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )
