@@ -34,7 +34,7 @@ class _HomePageState extends State<HomePage> {
   late final KnowledgePipeline knowledge;
   final search = TextEditingController();
   final categories = const [
-    'Todas', 'Inbox', 'Trabajo', 'Personal', 'Compras', 'Gastos',
+    'Todas', 'Inbox', 'Clientes', 'Trabajo', 'Personal', 'Compras', 'Gastos',
     'Ideas', 'Documentos', 'Recordatorios', 'Fotos'
   ];
 
