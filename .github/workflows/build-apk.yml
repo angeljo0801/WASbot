@@ -84,7 +84,7 @@ jobs:
 
           p = Path('android/app/build.gradle.kts')
           s = p.read_text()
-          s = s.replace('minSdk = flutter.minSdkVersion', 'minSdk = 26')
+          s = s.replace('minSdk = flutter.minSdkVersion', 'minSdk = 35')
           s = s.replace('ndkVersion = flutter.ndkVersion', 'ndkVersion = "27.0.12077973"')
           s = re.sub(r'namespace\s*=\s*"[^"]+"', 'namespace = "com.whatsbot.whatsbot"', s, count=1)
           s = re.sub(r'applicationId\s*=\s*"[^"]+"', 'applicationId = "com.whatsbot.whatsbot"', s, count=1)
@@ -222,7 +222,7 @@ jobs:
       - name: Build stable release APK
         working-directory: mobile
         run: |
-          flutter build apk --release --target-platform android-arm64 --build-name 0.8.3 --build-number "$GITHUB_RUN_NUMBER"
+          flutter build apk --release --target-platform android-arm64 --build-name 0.9.0 --build-number "$GITHUB_RUN_NUMBER"
 
       - name: Verify APK signature
         working-directory: mobile
@@ -233,7 +233,7 @@ jobs:
           "$APKSIGNER" verify --verbose build/app/outputs/flutter-apk/app-release.apk
           {
             echo "applicationId=com.whatsbot.whatsbot"
-            echo "versionName=0.8.3"
+            echo "versionName=0.9.0"
             echo "buildNumber=$GITHUB_RUN_NUMBER"
             echo "signing=persistent"
             echo "backups=Downloads/WhatsBot"
@@ -242,7 +242,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: WhatsBot-v0.8.3-Operator-Sync-APK
+          name: WhatsBot-v0.9.0-Knowledge-Inbox-APK
           path: |
             mobile/build/app/outputs/flutter-apk/app-release.apk
             mobile/build/app/outputs/flutter-apk/BUILD_IDENTITY.txt
