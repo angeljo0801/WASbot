@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../services/api_service.dart';
+import '../services/paqueteria_purchase_sync_service.dart';
 
 class NewNotePage extends StatefulWidget {
   final ApiService api;
@@ -18,10 +19,12 @@ class NewNotePage extends StatefulWidget {
 class _NewNotePageState extends State<NewNotePage> {
   final title = TextEditingController();
   final content = TextEditingController();
+  final customerName = TextEditingController();
+  final customerPhone = TextEditingController();
   final picker = ImagePicker();
 
   String category = 'Inbox';
-  String? photoPath;
+  final List<String> photoPaths = [];
   bool saving = false;
   bool pickingPhoto = false;
 
@@ -41,6 +44,8 @@ class _NewNotePageState extends State<NewNotePage> {
   void dispose() {
     title.dispose();
     content.dispose();
+    customerName.dispose();
+    customerPhone.dispose();
     super.dispose();
   }
 
@@ -59,32 +64,35 @@ class _NewNotePageState extends State<NewNotePage> {
             ? '.webp'
             : '.jpg';
     final target = File(
-      '${folder.path}/purchase_${DateTime.now().microsecondsSinceEpoch}$extension',
+      '${folder.path}/purchase_${DateTime.now().microsecondsSinceEpoch}_${photoPaths.length}$extension',
     );
     await source.copy(target.path);
     return target.path;
   }
 
-  Future<void> _pickPhoto(ImageSource source) async {
+  Future<void> _pickPhotos(String action) async {
     if (pickingPhoto) return;
     setState(() => pickingPhoto = true);
     try {
-      final image = await picker.pickImage(
-        source: source,
-        imageQuality: 88,
-        maxWidth: 2200,
-      );
-      if (image == null) return;
-
-      final savedPath = await _persistPhoto(image);
-      final previous = photoPath;
-      if (mounted) setState(() => photoPath = savedPath);
-
-      if (previous != null && previous != savedPath) {
-        try {
-          final old = File(previous);
-          if (await old.exists()) await old.delete();
-        } catch (_) {}
+      final added = <String>[];
+      if (action == 'camera') {
+        final image = await picker.pickImage(
+          source: ImageSource.camera,
+          imageQuality: 88,
+          maxWidth: 2200,
+        );
+        if (image != null) added.add(await _persistPhoto(image));
+      } else {
+        final images = await picker.pickMultiImage(
+          imageQuality: 88,
+          maxWidth: 2200,
+        );
+        for (final image in images) {
+          added.add(await _persistPhoto(image));
+        }
+      }
+      if (mounted && added.isNotEmpty) {
+        setState(() => photoPaths.addAll(added));
       }
     } catch (e) {
       if (mounted) {
@@ -97,10 +105,18 @@ class _NewNotePageState extends State<NewNotePage> {
     }
   }
 
-  Future<void> _removePhoto() async {
-    final path = photoPath;
-    setState(() => photoPath = null);
-    if (path != null) {
+  Future<void> _removePhoto(String path) async {
+    setState(() => photoPaths.remove(path));
+    try {
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+    } catch (_) {}
+  }
+
+  Future<void> _clearPurchasePhotos() async {
+    final old = List<String>.from(photoPaths);
+    setState(() => photoPaths.clear());
+    for (final path in old) {
       try {
         final file = File(path);
         if (await file.exists()) await file.delete();
@@ -115,19 +131,55 @@ class _NewNotePageState extends State<NewNotePage> {
       );
       return;
     }
+    if (category == 'Compras' && customerName.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Escribe el nombre del cliente.')),
+      );
+      return;
+    }
+    if (category == 'Compras' && customerPhone.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Escribe el número del cliente.')),
+      );
+      return;
+    }
 
     setState(() => saving = true);
     try {
+      final isPurchase = category == 'Compras';
       final note = await widget.api.createNote(
         title: title.text.trim(),
         content: content.text.trim(),
         category: category,
-        mediaPath: category == 'Compras' ? photoPath : null,
+        mediaPath: isPurchase && photoPaths.isNotEmpty ? photoPaths.first : null,
+        customerName: isPurchase ? customerName.text.trim() : '',
+        customerPhone: isPurchase ? customerPhone.text.trim() : '',
+        photoPaths: isPurchase ? List<String>.from(photoPaths) : const <String>[],
       );
+
+      var purchaseSyncPending = false;
+      if (isPurchase) {
+        final sync = PaqueteriaPurchaseSyncService(widget.api);
+        await sync.enqueue(
+          externalId: 'whatsbot-${note.id}',
+          customerName: customerName.text.trim(),
+          customerPhone: customerPhone.text.trim(),
+          title: title.text.trim(),
+          description: content.text.trim(),
+          photoPaths: List<String>.from(photoPaths),
+          createdAt: note.createdAt,
+        );
+        purchaseSyncPending = await sync.pendingCount() > 0;
+      }
+
       if (!mounted) return;
-      final message = note.pendingSync
-          ? 'Guardada en el teléfono. Se sincronizará cuando haya servidor.'
-          : 'Nota guardada.';
+      final message = isPurchase
+          ? (purchaseSyncPending
+              ? 'Compra guardada. Quedó pendiente de sincronizar con Paquetería.'
+              : 'Compra guardada y enviada para sincronizar con Paquetería.')
+          : (note.pendingSync
+              ? 'Guardada en el teléfono. Se sincronizará cuando haya servidor.'
+              : 'Nota guardada.');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(message)),
       );
@@ -143,8 +195,7 @@ class _NewNotePageState extends State<NewNotePage> {
     }
   }
 
-  Widget _purchasePhotoSection() {
-    final path = photoPath;
+  Widget _purchaseSection() {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(14),
@@ -152,48 +203,89 @@ class _NewNotePageState extends State<NewNotePage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Foto de la compra',
+              'Datos de la compra',
               style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: customerName,
+              decoration: const InputDecoration(
+                labelText: 'Nombre del cliente *',
+                prefixIcon: Icon(Icons.person_outline),
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: customerPhone,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(
+                labelText: 'Número / teléfono *',
+                prefixIcon: Icon(Icons.phone_outlined),
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Text(
+              'Fotos de la compra',
+              style: Theme.of(context).textTheme.titleSmall,
             ),
             const SizedBox(height: 6),
             const Text(
-              'Opcional. La imagen se guarda dentro de WhatsBot y queda asociada a esta compra.',
+              'Opcional. Puedes guardar una o varias fotos, igual que en Paquetería.',
             ),
-            const SizedBox(height: 12),
-            if (path != null && File(path).existsSync()) ...[
-              ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: Image.file(
-                  File(path),
-                  height: 220,
-                  width: double.infinity,
-                  fit: BoxFit.cover,
+            const SizedBox(height: 10),
+            if (photoPaths.isNotEmpty)
+              SizedBox(
+                height: 116,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: photoPaths.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 8),
+                  itemBuilder: (_, index) {
+                    final path = photoPaths[index];
+                    return Stack(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: Image.file(
+                            File(path),
+                            width: 116,
+                            height: 116,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                        Positioned(
+                          right: 2,
+                          top: 2,
+                          child: IconButton.filled(
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () => _removePhoto(path),
+                            icon: const Icon(Icons.close, size: 18),
+                          ),
+                        ),
+                      ],
+                    );
+                  },
                 ),
               ),
-              const SizedBox(height: 10),
-            ],
+            if (photoPaths.isNotEmpty) const SizedBox(height: 10),
             Wrap(
               spacing: 10,
               runSpacing: 10,
               children: [
                 OutlinedButton.icon(
                   onPressed:
-                      pickingPhoto ? null : () => _pickPhoto(ImageSource.gallery),
-                  icon: const Icon(Icons.photo_library_outlined),
+                      pickingPhoto ? null : () => _pickPhotos('gallery'),
+                  icon: const Icon(Icons.collections_outlined),
                   label: const Text('Galería'),
                 ),
                 OutlinedButton.icon(
                   onPressed:
-                      pickingPhoto ? null : () => _pickPhoto(ImageSource.camera),
+                      pickingPhoto ? null : () => _pickPhotos('camera'),
                   icon: const Icon(Icons.camera_alt_outlined),
                   label: const Text('Cámara'),
                 ),
-                if (path != null)
-                  TextButton.icon(
-                    onPressed: pickingPhoto ? null : _removePhoto,
-                    icon: const Icon(Icons.delete_outline),
-                    label: const Text('Quitar foto'),
-                  ),
               ],
             ),
             if (pickingPhoto) ...[
@@ -215,9 +307,11 @@ class _NewNotePageState extends State<NewNotePage> {
             children: [
               TextField(
                 controller: title,
-                decoration: const InputDecoration(
-                  labelText: 'Título',
-                  border: OutlineInputBorder(),
+                decoration: InputDecoration(
+                  labelText: category == 'Compras'
+                      ? 'Compra / tienda / título'
+                      : 'Título',
+                  border: const OutlineInputBorder(),
                 ),
               ),
               const SizedBox(height: 14),
@@ -235,8 +329,8 @@ class _NewNotePageState extends State<NewNotePage> {
                   final next = v ?? category;
                   if (category == 'Compras' &&
                       next != 'Compras' &&
-                      photoPath != null) {
-                    await _removePhoto();
+                      photoPaths.isNotEmpty) {
+                    await _clearPurchasePhotos();
                   }
                   if (mounted) setState(() => category = next);
                 },
@@ -247,17 +341,19 @@ class _NewNotePageState extends State<NewNotePage> {
               ),
               if (category == 'Compras') ...[
                 const SizedBox(height: 14),
-                _purchasePhotoSection(),
+                _purchaseSection(),
               ],
               const SizedBox(height: 14),
               TextField(
                 controller: content,
                 minLines: 6,
                 maxLines: 14,
-                decoration: const InputDecoration(
-                  labelText: 'Contenido',
+                decoration: InputDecoration(
+                  labelText: category == 'Compras'
+                      ? 'Detalles de la compra'
+                      : 'Contenido',
                   alignLabelWithHint: true,
-                  border: OutlineInputBorder(),
+                  border: const OutlineInputBorder(),
                 ),
               ),
               const SizedBox(height: 18),
