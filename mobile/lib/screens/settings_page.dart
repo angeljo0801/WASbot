@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/api_service.dart';
+import 'backup_page.dart';
 
 class SettingsPage extends StatefulWidget {
   final ApiService api;
@@ -284,6 +285,21 @@ class _SettingsPageState extends State<SettingsPage> {
                     ),
                     const SizedBox(height: 10),
                     statusCard(),
+                    const SizedBox(height: 12),
+                    Card(
+                      child: ListTile(
+                        leading: const Icon(Icons.backup_outlined),
+                        title: const Text('Salvas'),
+                        subtitle: const Text(
+                          'Copia automática diaria, crear salva y restaurar desde Descargas/WhatsBot.',
+                        ),
+                        trailing: const Icon(Icons.chevron_right),
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => const BackupPage()),
+                        ),
+                      ),
+                    ),
                     const Divider(height: 40),
 
                     Text('WhatsApp', style: Theme.of(context).textTheme.titleLarge),
