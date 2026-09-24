@@ -116,6 +116,61 @@ class LocalAiService {
     }
   }
 
+  Future<String> ask({
+    required String system,
+    required String prompt,
+    int maxTokens = 900,
+    double temperature = 0.2,
+  }) async {
+    final settings = await this.settings();
+    if (settings.mode != AiMode.local) {
+      throw StateError('El modo de IA actual no es local.');
+    }
+    await loadModel(settings.modelPath);
+    final controller = _controller;
+    if (controller == null) {
+      throw StateError('No se pudo cargar el modelo local.');
+    }
+
+    final buffer = StringBuffer();
+    final completer = Completer<void>();
+    late StreamSubscription<String> sub;
+    sub = controller
+        .generateChat(
+          messages: [
+            ChatMessage(role: 'system', content: system),
+            ChatMessage(role: 'user', content: prompt),
+          ],
+          maxTokens: maxTokens,
+          temperature: temperature,
+          topP: 0.9,
+          repeatPenalty: 1.1,
+        )
+        .listen(
+          buffer.write,
+          onError: (Object error, StackTrace stack) {
+            if (!completer.isCompleted) {
+              completer.completeError(error, stack);
+            }
+          },
+          onDone: () {
+            if (!completer.isCompleted) completer.complete();
+          },
+          cancelOnError: true,
+        );
+
+    try {
+      await completer.future.timeout(const Duration(minutes: 6));
+    } finally {
+      await sub.cancel();
+    }
+    final answer = buffer.toString().trim();
+    if (answer.isEmpty) {
+      throw Exception('El modelo local devolvió una respuesta vacía.');
+    }
+    return answer;
+  }
+
   Future<OrganizedNote> organize(Note note) async {
     final s = await settings();
     if (s.mode != AiMode.local) {
