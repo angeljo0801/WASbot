@@ -7,8 +7,14 @@ import '../services/api_service.dart';
 import '../services/ai_provider_service.dart';
 import '../services/local_ai_service.dart';
 import '../services/paqueteria_purchase_sync_service.dart';
+import '../services/embedding_service.dart';
+import '../services/knowledge_pipeline.dart';
+import '../services/knowledge_store.dart';
 import 'ai_settings_page.dart';
 import 'combo_page.dart';
+import 'draft_review_page.dart';
+import 'entities_page.dart';
+import 'knowledge_chat_page.dart';
 import 'new_note_page.dart';
 import 'note_detail_page.dart';
 import 'settings_page.dart';
@@ -24,6 +30,8 @@ class _HomePageState extends State<HomePage> {
   final api = ApiService();
   final localAi = LocalAiService();
   late final AiProviderService ai;
+  late final EmbeddingService embeddings;
+  late final KnowledgePipeline knowledge;
   final search = TextEditingController();
   final categories = const [
     'Todas', 'Inbox', 'Trabajo', 'Personal', 'Compras', 'Gastos',
@@ -38,12 +46,23 @@ class _HomePageState extends State<HomePage> {
   int aiTotal = 0;
   String aiRunningLabel = 'IA';
   int paqueteriaPending = 0;
+  int pendingDrafts = 0;
+  bool knowledgeRunning = false;
+  int knowledgeDone = 0;
+  int knowledgeTotal = 0;
+  String knowledgeLabel = '';
   String? error;
 
   @override
   void initState() {
     super.initState();
     ai = AiProviderService(localAi: localAi);
+    embeddings = EmbeddingService();
+    knowledge = KnowledgePipeline(
+      api: api,
+      ai: ai,
+      embeddings: embeddings,
+    );
     refresh();
   }
 
@@ -51,6 +70,7 @@ class _HomePageState extends State<HomePage> {
   void dispose() {
     search.dispose();
     unawaited(localAi.dispose());
+    unawaited(embeddings.dispose());
     super.dispose();
   }
 
@@ -74,7 +94,53 @@ class _HomePageState extends State<HomePage> {
         if (mounted) setState(() => paqueteriaPending = pending);
       }());
     }
-    if (runLocalAi && error == null) unawaited(_processPendingAi());
+    if (error == null) {
+      unawaited(_loadKnowledgeCounts());
+      if (runLocalAi) {
+        unawaited(_runPostRefreshIntelligence());
+      }
+    }
+  }
+
+  Future<void> _loadKnowledgeCounts() async {
+    final drafts = await KnowledgeStore.instance.drafts(status: 'pending');
+    if (mounted) setState(() => pendingDrafts = drafts.length);
+  }
+
+  Future<void> _runPostRefreshIntelligence() async {
+    await _processPendingAi();
+    await _processKnowledge();
+  }
+
+  Future<void> _processKnowledge() async {
+    if (knowledgeRunning) return;
+    if (mounted) {
+      setState(() {
+        knowledgeRunning = true;
+        knowledgeDone = 0;
+        knowledgeTotal = notes.length;
+        knowledgeLabel = '';
+      });
+    }
+    try {
+      await knowledge.processNotes(
+        notes,
+        onProgress: (p) {
+          if (!mounted) return;
+          setState(() {
+            knowledgeDone = p.done;
+            knowledgeTotal = p.total;
+            knowledgeLabel = p.label;
+          });
+        },
+      );
+      await _loadKnowledgeCounts();
+      final refreshed =
+          await api.getNotes(query: search.text, category: category);
+      if (mounted) setState(() => notes = refreshed);
+    } finally {
+      if (mounted) setState(() => knowledgeRunning = false);
+    }
   }
 
   Future<void> _processPendingAi({bool force = false}) async {
@@ -207,6 +273,34 @@ class _HomePageState extends State<HomePage> {
         title: const Text('WhatsBot'),
         actions: [
           IconButton(
+            tooltip: 'Chat con tus notas',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => KnowledgeChatPage(
+                  api: api,
+                  ai: ai,
+                  embeddings: embeddings,
+                ),
+              ),
+            ),
+            icon: const Icon(Icons.chat_bubble_outline),
+          ),
+          IconButton(
+            tooltip: 'Entidades',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => EntitiesPage(
+                  api: api,
+                  ai: ai,
+                  embeddings: embeddings,
+                ),
+              ),
+            ),
+            icon: const Icon(Icons.account_tree_outlined),
+          ),
+          IconButton(
             tooltip: 'Paquetería',
             onPressed: () async {
               await Navigator.push(
@@ -259,6 +353,35 @@ class _HomePageState extends State<HomePage> {
           children: [
             Text('Tu bandeja personal desde WhatsApp', style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 8),
+            if (pendingDrafts > 0)
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.pending_actions_outlined),
+                  title: Text(
+                    '$pendingDrafts borrador(es) OCR pendientes de confirmar',
+                  ),
+                  subtitle: const Text(
+                    'Revísalos antes de enviarlos a Paquetería.',
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () async {
+                    final drafts = await KnowledgeStore.instance
+                        .drafts(status: 'pending');
+                    if (!mounted || drafts.isEmpty) return;
+                    await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) =>
+                            DraftReviewPage(draft: drafts.first, api: api),
+                      ),
+                    );
+                    if (mounted) {
+                      await _loadKnowledgeCounts();
+                      refresh();
+                    }
+                  },
+                ),
+              ),
             if (paqueteriaPending > 0)
               Card(
                 child: ListTile(
@@ -274,6 +397,29 @@ class _HomePageState extends State<HomePage> {
                     tooltip: 'Reintentar',
                     onPressed: refresh,
                     icon: const Icon(Icons.refresh),
+                  ),
+                ),
+              ),
+            if (knowledgeRunning)
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Row(
+                    children: [
+                      const SizedBox.square(
+                        dimension: 22,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          'Analizando Inbox… $knowledgeDone/$knowledgeTotal'
+                          '${knowledgeLabel.isEmpty ? '' : ' · $knowledgeLabel'}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
@@ -383,10 +529,15 @@ class _HomePageState extends State<HomePage> {
                     },
                     itemBuilder: (_) => const [PopupMenuItem(value: 'delete', child: Text('Borrar'))],
                   ),
-                  onTap: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => NoteDetailPage(note: n, api: api)),
-                  ),
+                  onTap: () async {
+                    await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => NoteDetailPage(note: n, api: api),
+                      ),
+                    );
+                    if (mounted) refresh();
+                  },
                 ),
               ),
             ),
