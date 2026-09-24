@@ -25,6 +25,7 @@ class _SettingsPageState extends State<SettingsPage> {
   bool checking = false;
   bool? serverOnline;
   bool? whatsappConnected;
+  Map<String, dynamic>? combo;
 
   @override
   void initState() {
@@ -169,15 +170,68 @@ class _SettingsPageState extends State<SettingsPage> {
     await widget.api.saveSettings(url.text, key.text);
     final ok = await widget.api.health();
     Map<String, dynamic>? wa;
+    Map<String, dynamic>? comboStatus;
     if (ok) {
       wa = await widget.api.whatsappSettings();
+      comboStatus = await widget.api.comboStatus();
     }
     if (!mounted) return;
     setState(() {
       checking = false;
       serverOnline = ok;
       whatsappConnected = wa?['connected'] as bool?;
+      combo = comboStatus;
     });
+  }
+
+  Widget comboCard() {
+    final data = combo;
+    if (data == null) {
+      return const Card(
+        child: ListTile(
+          leading: Icon(Icons.hub_outlined),
+          title: Text('Combo WhatsBot + Paquetería'),
+          subtitle: Text('Pulsa Probar conexión para comprobar la sincronización.'),
+        ),
+      );
+    }
+    final counts = data['snapshot_counts'];
+    final map = counts is Map ? Map<String, dynamic>.from(counts) : <String, dynamic>{};
+    final clients = map['clients'] ?? 0;
+    final purchases = map['purchases'] ?? 0;
+    final packages = map['packages'] ?? 0;
+    final pending = data['pending_purchase_conversations'] ?? 0;
+    final updated = (data['snapshot_updated_at'] ?? '').toString();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.hub_outlined),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Combo WhatsBot + Paquetería',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text('Clientes: $clients · Compras: $purchases · Paquetes: $packages'),
+            const SizedBox(height: 4),
+            Text('Conversaciones de compra pendientes: $pending'),
+            if (updated.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text('Última sincronización del negocio: $updated'),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 
   Widget statusCard() {
@@ -286,6 +340,8 @@ class _SettingsPageState extends State<SettingsPage> {
                     const SizedBox(height: 10),
                     statusCard(),
                     const SizedBox(height: 12),
+                    comboCard(),
+                    const SizedBox(height: 12),
                     Card(
                       child: ListTile(
                         leading: const Icon(Icons.backup_outlined),
@@ -305,7 +361,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     Text('WhatsApp', style: Theme.of(context).textTheme.titleLarge),
                     const SizedBox(height: 8),
                     const Text(
-                      'Aquí defines el número de WhatsBot y qué números personales tienen permiso para crear notas.',
+                      'Aquí defines el número de WhatsBot y qué números personales son operadores autorizados. Esos números pueden crear notas y clientes, preparar compras y consultar datos sincronizados de Paquetería.',
                     ),
                     const SizedBox(height: 16),
                     DropdownButtonFormField<String>(
@@ -340,7 +396,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     Text('Números autorizados', style: Theme.of(context).textTheme.titleMedium),
                     const SizedBox(height: 6),
                     const Text(
-                      'Solo los mensajes enviados desde estos números se convertirán en notas.',
+                      'Estos son los operadores autorizados para usar las funciones del combo: clientes, compras, saldos, tracking y consultas de Paquetería.',
                     ),
                     const SizedBox(height: 12),
                     Row(
