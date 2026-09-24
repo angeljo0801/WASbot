@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -11,6 +12,7 @@ class AiProvider {
   static const openai = 'openai';
   static const gemini = 'gemini';
   static const localServer = 'local_server';
+  static const manager = 'manager';
   static const device = 'device';
   static const rules = 'rules';
 
@@ -18,6 +20,7 @@ class AiProvider {
     openai,
     gemini,
     localServer,
+    manager,
     device,
     rules,
   };
@@ -53,6 +56,8 @@ class AiProviderSettings {
 
 class AiProviderService {
   static const _secure = FlutterSecureStorage();
+  static const MethodChannel _managerChannel =
+      MethodChannel('com.angelapps.local_ai_manager/client');
 
   final LocalAiService localAi;
 
@@ -130,6 +135,7 @@ class AiProviderService {
     if (provider == AiProvider.openai) return 'openai';
     if (provider == AiProvider.gemini) return 'gemini';
     if (provider == AiProvider.localServer) return 'local_server';
+    if (provider == AiProvider.manager) return 'manager';
     if (provider == AiProvider.device) return 'local';
     return 'rules';
   }
@@ -138,6 +144,7 @@ class AiProviderService {
     if (provider == AiProvider.openai) return 'OpenAI';
     if (provider == AiProvider.gemini) return 'Gemini';
     if (provider == AiProvider.localServer) return 'Servidor local';
+    if (provider == AiProvider.manager) return 'Local AI Manager';
     if (provider == AiProvider.device) return 'GGUF local';
     return 'Reglas';
   }
@@ -149,6 +156,12 @@ class AiProviderService {
         throw Exception('Selecciona primero un modelo GGUF.');
       }
       await localAi.loadModel(s.deviceModelPath);
+      return;
+    }
+    if (s.provider == AiProvider.manager) {
+      await _managerChannel
+          .invokeMethod<String>('ping')
+          .timeout(const Duration(seconds: 12));
       return;
     }
     if (s.provider == AiProvider.openai) {
@@ -216,7 +229,9 @@ class AiProviderService {
         sourceText;
 
     String raw;
-    if (s.provider == AiProvider.openai) {
+    if (s.provider == AiProvider.manager) {
+      raw = await _askManager(system: system, prompt: prompt);
+    } else if (s.provider == AiProvider.openai) {
       raw = await _askOpenAiCompatible(
         baseUrl: s.openAiBaseUrl,
         apiKey: s.openAiKey,
@@ -275,6 +290,34 @@ class AiProviderService {
       category: category,
       tags: tags,
     );
+  }
+
+  Future<String> _askManager({
+    required String system,
+    required String prompt,
+  }) async {
+    try {
+      final answer = await _managerChannel
+          .invokeMethod<String>('ask', {
+            'prompt': prompt,
+            'system': system,
+            'maxTokens': 700,
+            'temperature': 0.15,
+          })
+          .timeout(const Duration(minutes: 6));
+      final text = (answer ?? '').trim();
+      if (text.isEmpty) {
+        throw Exception('Local AI Manager no devolvió una respuesta.');
+      }
+      return text;
+    } on PlatformException catch (e) {
+      final message = e.message?.trim() ?? '';
+      throw Exception(
+        message.isEmpty
+            ? 'No pude comunicarme con Local AI Manager.'
+            : message,
+      );
+    }
   }
 
   Future<String> _askOpenAiCompatible({
