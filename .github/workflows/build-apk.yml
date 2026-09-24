@@ -118,6 +118,12 @@ jobs:
           manifest = Path('android/app/src/main/AndroidManifest.xml')
           x = manifest.read_text()
           root = '<manifest xmlns:android="http://schemas.android.com/apk/res/android">'
+          if 'android.permission.INTERNET' not in x:
+              x = x.replace(
+                  root,
+                  root + '\n    <uses-permission android:name="android.permission.INTERNET" />',
+                  1,
+              )
           if 'android.permission.WRITE_EXTERNAL_STORAGE' not in x:
               x = x.replace(
                   root,
@@ -216,7 +222,7 @@ jobs:
       - name: Build stable release APK
         working-directory: mobile
         run: |
-          flutter build apk --release --target-platform android-arm64 --build-name 0.8.1 --build-number "$GITHUB_RUN_NUMBER"
+          flutter build apk --release --target-platform android-arm64 --build-name 0.8.2 --build-number "$GITHUB_RUN_NUMBER"
 
       - name: Verify APK signature
         working-directory: mobile
@@ -227,7 +233,7 @@ jobs:
           "$APKSIGNER" verify --verbose build/app/outputs/flutter-apk/app-release.apk
           {
             echo "applicationId=com.whatsbot.whatsbot"
-            echo "versionName=0.8.1"
+            echo "versionName=0.8.2"
             echo "buildNumber=$GITHUB_RUN_NUMBER"
             echo "signing=persistent"
             echo "backups=Downloads/WhatsBot"
@@ -236,7 +242,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: WhatsBot-v0.8.1-Local-Manager-APK
+          name: WhatsBot-v0.8.2-Internet-Local-Manager-APK
           path: |
             mobile/build/app/outputs/flutter-apk/app-release.apk
             mobile/build/app/outputs/flutter-apk/BUILD_IDENTITY.txt
