@@ -1,14 +1,17 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/entity_record.dart';
 import '../models/note.dart';
 import '../services/ai_provider_service.dart';
 import '../services/api_service.dart';
 import '../services/embedding_service.dart';
+import '../services/knowledge_chat_store.dart';
 import '../services/knowledge_store.dart';
-import 'note_detail_page.dart';
+import 'knowledge_chat_widgets.dart';
 
 class KnowledgeChatPage extends StatefulWidget {
   final ApiService api;
@@ -31,14 +34,38 @@ class KnowledgeChatPage extends StatefulWidget {
 class _KnowledgeChatPageState extends State<KnowledgeChatPage> {
   final store = KnowledgeStore.instance;
   final input = TextEditingController();
-  final scroll = ScrollController();
-  List<Map<String, dynamic>> messages = [];
+
+  List<KnowledgeChatSession> chats = [];
+  String? activeId;
   List<Note> notes = [];
+
   bool loading = true;
   bool sending = false;
   bool embeddingReady = false;
   bool downloading = false;
   double downloadProgress = 0;
+
+  bool useNotes = true;
+  String responseMode = 'normal';
+
+  Timer? _responseTimer;
+  DateTime? _responseStartedAt;
+  double _responseSeconds = 0;
+  int _turnToken = 0;
+  bool _cancelRequested = false;
+
+  KnowledgeChatSession? get active {
+    if (chats.isEmpty) return null;
+    return chats.firstWhere(
+      (c) => c.id == activeId,
+      orElse: () => chats.first,
+    );
+  }
+
+  String get _ownerType => widget.entity == null ? 'knowledge' : 'entity';
+  String get _ownerId => widget.entity?.id ?? 'main';
+  String get _participantName =>
+      widget.entity == null ? 'WhatsBot AI' : 'WhatsBot · ${widget.entity!.name}';
 
   @override
   void initState() {
@@ -48,24 +75,260 @@ class _KnowledgeChatPageState extends State<KnowledgeChatPage> {
 
   @override
   void dispose() {
+    _responseTimer?.cancel();
     input.dispose();
-    scroll.dispose();
     super.dispose();
   }
 
   Future<void> load() async {
-    final values = await Future.wait([
-      widget.api.getNotes(),
-      store.chatMessages(),
-      widget.embeddings.isReady(),
-    ]);
+    final prefs = await SharedPreferences.getInstance();
+    var sessions = await KnowledgeChatStore.listFor(_ownerType, _ownerId);
+    final allNotes = await widget.api.getNotes();
+    final ready = await widget.embeddings.isReady();
+
+    if (sessions.isEmpty) {
+      final legacy = await store.chatMessages();
+      if (widget.entity == null && legacy.isNotEmpty) {
+        final now = DateTime.now();
+        final imported = KnowledgeChatSession(
+          id: 'chat_imported_${now.microsecondsSinceEpoch}',
+          ownerType: _ownerType,
+          ownerId: _ownerId,
+          title: 'Chat anterior',
+          createdAt: now,
+          updatedAt: now,
+          messages: legacy.map((m) {
+            var sourceKeys = <String>[];
+            final raw = m['sources_json'];
+            if (raw is String && raw.isNotEmpty) {
+              try {
+                final decoded = jsonDecode(raw);
+                if (decoded is List) {
+                  sourceKeys =
+                      decoded.map((e) => e.toString()).toList(growable: false);
+                }
+              } catch (_) {}
+            }
+            return KnowledgeChatMessage(
+              role: (m['role'] ?? '').toString() == 'assistant'
+                  ? 'assistant'
+                  : 'user',
+              text: (m['text'] ?? '').toString(),
+              createdAt:
+                  DateTime.tryParse((m['created_at'] ?? '').toString()) ?? now,
+              sourceKeys: sourceKeys,
+            );
+          }).toList(),
+        );
+        await KnowledgeChatStore.save(imported);
+        sessions = [imported];
+      } else {
+        final created = KnowledgeChatSession.empty(
+          ownerType: _ownerType,
+          ownerId: _ownerId,
+        );
+        await KnowledgeChatStore.save(created);
+        sessions = [created];
+      }
+    }
+
     if (!mounted) return;
     setState(() {
-      notes = values[0] as List<Note>;
-      messages = values[1] as List<Map<String, dynamic>>;
-      embeddingReady = values[2] as bool;
+      chats = sessions;
+      activeId = sessions.first.id;
+      notes = allNotes;
+      embeddingReady = ready;
+      useNotes = prefs.getBool('whatsbot_chat_use_notes') ?? true;
+      responseMode =
+          prefs.getString('whatsbot_chat_response_mode') ?? 'normal';
       loading = false;
     });
+  }
+
+  void _put(KnowledgeChatSession session) {
+    final next = List<KnowledgeChatSession>.from(chats);
+    final index = next.indexWhere((c) => c.id == session.id);
+    if (index >= 0) {
+      next[index] = session;
+    } else {
+      next.insert(0, session);
+    }
+    next.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    if (mounted) {
+      setState(() {
+        chats = next;
+        activeId = session.id;
+      });
+    }
+  }
+
+  Future<void> _newChat() async {
+    if (sending) return;
+    final created = KnowledgeChatSession.empty(
+      ownerType: _ownerType,
+      ownerId: _ownerId,
+    );
+    await KnowledgeChatStore.save(created);
+    _put(created);
+  }
+
+  Future<void> _delete(KnowledgeChatSession session) async {
+    await KnowledgeChatStore.delete(session.id);
+    var next = chats.where((c) => c.id != session.id).toList();
+    if (next.isEmpty) {
+      final created = KnowledgeChatSession.empty(
+        ownerType: _ownerType,
+        ownerId: _ownerId,
+      );
+      await KnowledgeChatStore.save(created);
+      next = [created];
+    }
+    if (!mounted) return;
+    setState(() {
+      chats = next;
+      activeId = next.first.id;
+    });
+  }
+
+  Future<void> _export(KnowledgeChatSession session) async {
+    if (session.messages.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Este chat todavía está vacío.')),
+        );
+      }
+      return;
+    }
+    final path = await KnowledgeChatStore.exportPdf(
+      session,
+      participantName: _participantName,
+    );
+    if (!mounted || path == null) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Chat exportado como PDF.')),
+    );
+  }
+
+  Future<void> _history() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (bc) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.of(bc).size.height * .72,
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'Historial de chats',
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Nuevo chat',
+                      onPressed: () {
+                        Navigator.pop(bc);
+                        _newChat();
+                      },
+                      icon: const Icon(Icons.add_comment_outlined),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: ListView(
+                  children: [
+                    for (final c in chats)
+                      ListTile(
+                        leading: Icon(
+                          c.id == activeId
+                              ? Icons.chat_bubble
+                              : Icons.chat_bubble_outline,
+                        ),
+                        title: Text(
+                          c.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: Text('${c.messages.length} mensaje(s)'),
+                        onTap: () {
+                          setState(() => activeId = c.id);
+                          Navigator.pop(bc);
+                        },
+                        trailing: Wrap(
+                          children: [
+                            IconButton(
+                              tooltip: 'Exportar PDF',
+                              onPressed: () => _export(c),
+                              icon: const Icon(Icons.picture_as_pdf_outlined),
+                            ),
+                            IconButton(
+                              tooltip: 'Borrar',
+                              onPressed: () {
+                                Navigator.pop(bc);
+                                _delete(c);
+                              },
+                              icon: const Icon(Icons.delete_outline),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _setResponseMode(String value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('whatsbot_chat_response_mode', value);
+    if (mounted) setState(() => responseMode = value);
+  }
+
+  Future<void> _setUseNotes(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('whatsbot_chat_use_notes', value);
+    if (mounted) setState(() => useNotes = value);
+  }
+
+  void _startResponseTimer() {
+    _responseTimer?.cancel();
+    _responseStartedAt = DateTime.now();
+    _responseSeconds = 0;
+    _responseTimer = Timer.periodic(
+      const Duration(milliseconds: 100),
+      (_) {
+        if (!mounted || _responseStartedAt == null) return;
+        setState(() {
+          _responseSeconds = DateTime.now()
+                  .difference(_responseStartedAt!)
+                  .inMilliseconds /
+              1000.0;
+        });
+      },
+    );
+  }
+
+  void _stopResponseTimer() {
+    if (_responseStartedAt != null) {
+      _responseSeconds =
+          DateTime.now().difference(_responseStartedAt!).inMilliseconds /
+              1000.0;
+    }
+    _responseTimer?.cancel();
+    _responseTimer = null;
+    _responseStartedAt = null;
   }
 
   Future<void> downloadEmbeddings() async {
@@ -92,7 +355,9 @@ class _KnowledgeChatPageState extends State<KnowledgeChatPage> {
         setState(() => embeddingReady = true);
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Memoria semántica lista. Las notas ya se pueden buscar por significado.'),
+            content: Text(
+              'Memoria semántica lista. Las notas ya se pueden buscar por significado.',
+            ),
           ),
         );
       }
@@ -125,30 +390,15 @@ class _KnowledgeChatPageState extends State<KnowledgeChatPage> {
     return best;
   }
 
-  List<String> _sourceKeys(Map<String, dynamic> message) {
-    final raw = message['sources_json'];
-    if (raw is List) {
-      return raw.map((e) => e.toString()).where((e) => e.isNotEmpty).toList();
-    }
-    if (raw is String && raw.isNotEmpty) {
-      try {
-        final decoded = jsonDecode(raw);
-        if (decoded is List) {
-          return decoded
-              .map((e) => e.toString())
-              .where((e) => e.isNotEmpty)
-              .toList();
-        }
-      } catch (_) {}
-    }
-    return const <String>[];
-  }
-
-  Note? _noteForKey(String key) {
-    for (final note in notes) {
-      if (KnowledgeStore.noteKey(note) == key) return note;
-    }
-    return null;
+  String _excerpt(Note note, int maxChars) {
+    final text = (note.content.trim().isNotEmpty
+            ? note.content
+            : note.originalText)
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    return text.length > maxChars
+        ? '${text.substring(0, maxChars)}…'
+        : text;
   }
 
   String _friendlyAiError(Object error) {
@@ -166,284 +416,395 @@ class _KnowledgeChatPageState extends State<KnowledgeChatPage> {
     }
     final firstLine = text.split('\n').first.trim();
     return firstLine.length > 260
-        ? firstLine.substring(0, 260) + '…'
+        ? '${firstLine.substring(0, 260)}…'
         : firstLine;
   }
 
-  String _excerpt(Note note) {
-    final text = (note.content.trim().isNotEmpty
-            ? note.content
-            : note.originalText)
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
-    return text.length > 900 ? '${text.substring(0, 900)}…' : text;
+  Future<void> _stop() async {
+    if (!sending) return;
+    _cancelRequested = true;
+    _turnToken++;
+    await widget.ai.cancelCurrent();
+    _stopResponseTimer();
+
+    final session = active;
+    if (session != null &&
+        session.messages.isNotEmpty &&
+        session.messages.last.role == 'assistant') {
+      final nextMessages =
+          List<KnowledgeChatMessage>.from(session.messages);
+      if (nextMessages.last.text.trim().isEmpty ||
+          nextMessages.last.text == 'Pensando…') {
+        nextMessages[nextMessages.length - 1] =
+            nextMessages.last.copyWith(
+          text: 'Respuesta detenida.',
+          responseSeconds: _responseSeconds,
+        );
+      } else {
+        nextMessages[nextMessages.length - 1] =
+            nextMessages.last.copyWith(
+          responseSeconds: _responseSeconds,
+        );
+      }
+      final saved = session.copyWith(
+        updatedAt: DateTime.now(),
+        messages: nextMessages,
+      );
+      _put(saved);
+      await KnowledgeChatStore.save(saved);
+    }
+    if (mounted) setState(() => sending = false);
   }
 
   Future<void> send() async {
     final question = input.text.trim();
-    if (question.isEmpty || sending) return;
+    final session = active;
+    if (question.isEmpty || sending || session == null) return;
+
     input.clear();
-    await store.addChatMessage('user', question);
-    setState(() {
-      messages.add({'role': 'user', 'text': question});
-      sending = true;
-    });
-    _scrollDown();
+    final history = session.conversationContext(
+      maxChars: responseMode == 'fast'
+          ? 3500
+          : responseMode == 'deep'
+              ? 9000
+              : 6000,
+      maxMessages: responseMode == 'fast'
+          ? 8
+          : responseMode == 'deep'
+              ? 18
+              : 12,
+    );
+
+    final now = DateTime.now();
+    final pendingMessages =
+        List<KnowledgeChatMessage>.from(session.messages)
+          ..add(
+            KnowledgeChatMessage(
+              role: 'user',
+              text: question,
+              createdAt: now,
+            ),
+          )
+          ..add(
+            KnowledgeChatMessage(
+              role: 'assistant',
+              text: 'Pensando…',
+              createdAt: now,
+            ),
+          );
+
+    final pending = session.copyWith(
+      title: session.messages.isEmpty
+          ? KnowledgeChatSession.titleFrom(question)
+          : session.title,
+      updatedAt: now,
+      messages: pendingMessages,
+    );
+    _put(pending);
+    await KnowledgeChatStore.save(pending);
+
+    final token = ++_turnToken;
+    _cancelRequested = false;
+    if (mounted) setState(() => sending = true);
+    _startResponseTimer();
 
     try {
-      final entity = await _entityInQuestion(question);
+      EntityRecord? entity;
       Set<String>? restrict;
-      if (entity != null) {
-        restrict = (await store.noteKeysForEntity(entity.id)).toSet();
+      List<Note> selected = [];
+
+      if (useNotes) {
+        entity = await _entityInQuestion(question);
+        if (entity != null) {
+          restrict = (await store.noteKeysForEntity(entity.id)).toSet();
+        }
+
+        final limit = responseMode == 'fast'
+            ? 4
+            : responseMode == 'deep'
+                ? 12
+                : 8;
+        final hits = await widget.embeddings.search(
+          question,
+          notes,
+          limit: limit,
+          restrictKeys: restrict,
+        );
+        selected = hits.isNotEmpty
+            ? hits.map((e) => e.note).toList()
+            : (restrict == null
+                ? notes.take(limit).toList()
+                : notes
+                    .where(
+                      (n) => restrict!.contains(
+                        KnowledgeStore.noteKey(n),
+                      ),
+                    )
+                    .take(limit)
+                    .toList());
       }
 
-      final hits = await widget.embeddings.search(
-        question,
-        notes,
-        limit: 8,
-        restrictKeys: restrict,
-      );
-      final selected = hits.isNotEmpty
-          ? hits.map((e) => e.note).toList()
-          : (restrict == null
-              ? notes.take(8).toList()
-              : notes
-                  .where((n) => restrict!.contains(KnowledgeStore.noteKey(n)))
-                  .take(8)
-                  .toList());
+      final excerptLimit = responseMode == 'fast'
+          ? 450
+          : responseMode == 'deep'
+              ? 1200
+              : 850;
 
       final blocks = <String>[];
       for (var i = 0; i < selected.length; i++) {
         final note = selected[i];
-        final state = await store.noteState(KnowledgeStore.noteKey(note));
+        final state =
+            await store.noteState(KnowledgeStore.noteKey(note));
         final ocr = (state?['ocr_text'] ?? '').toString().trim();
+        final clippedOcr = ocr.length > excerptLimit
+            ? '${ocr.substring(0, excerptLimit)}…'
+            : ocr;
         blocks.add(
           '[N${i + 1}] ${note.title}\n'
           'Categoría: ${note.category}\n'
           'Fecha: ${note.createdAt.toLocal()}\n'
-          'Contenido: ${_excerpt(note)}'
-          '${ocr.isEmpty ? '' : '\nOCR: ${ocr.length > 700 ? ocr.substring(0, 700) + '…' : ocr}'}',
+          'Contenido: ${_excerpt(note, excerptLimit)}'
+          '${clippedOcr.isEmpty ? '' : '\nOCR: $clippedOcr'}',
         );
       }
 
-      final recent = messages
-          .where((m) => m['role'] == 'user' || m['role'] == 'assistant')
-          .toList()
-          .reversed
-          .take(6)
-          .toList()
-          .reversed
-          .map((m) => '${m['role']}: ${m['text']}')
-          .join('\n');
-
       const system =
           'Eres el chat privado de conocimiento de WhatsBot. '
-          'Responde usando como fuente principal las notas recuperadas. '
-          'Si una respuesta no está sustentada por las notas, dilo claramente. '
+          'Habla de forma natural y útil. '
+          'Cuando se habiliten las notas, úsalas como fuente principal para datos personales del usuario. '
+          'Si un dato debería venir de las notas y no aparece, dilo claramente. '
           'No inventes nombres, montos, fechas, tracking ni relaciones. '
           'Cuando uses una nota, cita su marcador [N1], [N2], etc. '
           'Puedes conectar información de varias notas cuando sea razonable.';
-      final prompt = [
-        if (entity != null)
+
+      final promptParts = <String>[
+        'CONVERSACIÓN:\n$history',
+        if (useNotes && entity != null)
           'Entidad consultada: ${entity.name} (${entity.type})',
-        'Conversación reciente:\n$recent',
-        'Pregunta actual: $question',
-        'Notas recuperadas:\n${blocks.isEmpty ? '(sin notas relevantes)' : blocks.join('\n\n')}',
-      ].join('\n\n');
+        if (useNotes)
+          'BASE DE NOTAS RELEVANTE:\n'
+              '${blocks.isEmpty ? '(sin notas relevantes)' : blocks.join('\n\n')}'
+        else
+          'BASE DE NOTAS: desactivada para este mensaje.',
+        'PREGUNTA:\n$question',
+      ];
 
       final answer = await widget.ai.ask(
         system: system,
-        prompt: prompt,
-        maxTokens: 1200,
-        temperature: 0.2,
+        prompt: promptParts.join('\n\n'),
+        maxTokens: responseMode == 'fast'
+            ? 650
+            : responseMode == 'deep'
+                ? 1900
+                : 1200,
+        temperature: responseMode == 'deep' ? 0.15 : 0.2,
       );
-      final sourceKeys =
-          selected.map(KnowledgeStore.noteKey).toList(growable: false);
-      await store.addChatMessage(
-        'assistant',
-        answer,
-        sourceKeys: sourceKeys,
+
+      if (!mounted ||
+          token != _turnToken ||
+          _cancelRequested) {
+        return;
+      }
+
+      _stopResponseTimer();
+      final current = active;
+      if (current == null ||
+          current.id != pending.id ||
+          current.messages.isEmpty) {
+        return;
+      }
+
+      final nextMessages =
+          List<KnowledgeChatMessage>.from(current.messages);
+      nextMessages[nextMessages.length - 1] =
+          nextMessages.last.copyWith(
+        text: answer,
+        sourceKeys:
+            selected.map(KnowledgeStore.noteKey).toList(growable: false),
+        responseSeconds: _responseSeconds,
       );
-      if (!mounted) return;
-      setState(() {
-        messages.add({
-          'role': 'assistant',
-          'text': answer,
-          'sources_json': jsonEncode(sourceKeys),
-        });
-      });
+
+      final saved = current.copyWith(
+        updatedAt: DateTime.now(),
+        messages: nextMessages,
+      );
+      _put(saved);
+      await KnowledgeChatStore.save(saved);
     } catch (e) {
-      final message = 'No pude responder: ' + _friendlyAiError(e);
-      await store.addChatMessage('assistant', message);
-      if (mounted) {
-        setState(() => messages.add({'role': 'assistant', 'text': message}));
+      if (!mounted || token != _turnToken || _cancelRequested) {
+        return;
+      }
+      _stopResponseTimer();
+      final current = active;
+      if (current != null &&
+          current.id == pending.id &&
+          current.messages.isNotEmpty) {
+        final nextMessages =
+            List<KnowledgeChatMessage>.from(current.messages);
+        nextMessages[nextMessages.length - 1] =
+            nextMessages.last.copyWith(
+          text: 'No pude responder: ${_friendlyAiError(e)}',
+          responseSeconds: _responseSeconds,
+        );
+        final saved = current.copyWith(
+          updatedAt: DateTime.now(),
+          messages: nextMessages,
+        );
+        _put(saved);
+        await KnowledgeChatStore.save(saved);
       }
     } finally {
-      if (mounted) setState(() => sending = false);
-      _scrollDown();
+      if (token == _turnToken) {
+        _stopResponseTimer();
+        if (mounted) setState(() => sending = false);
+      }
     }
-  }
-
-  void _scrollDown() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!scroll.hasClients) return;
-      scroll.animateTo(
-        scroll.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 250),
-        curve: Curves.easeOut,
-      );
-    });
   }
 
   @override
   Widget build(BuildContext context) {
-    final entity = widget.entity;
+    final session = active;
     return Scaffold(
       appBar: AppBar(
-        title: Text(entity == null ? 'Chat con tus notas' : 'Chat · ${entity.name}'),
+        title: Text(
+          widget.entity == null
+              ? 'Chat con tus notas'
+              : 'Chat · ${widget.entity!.name}',
+        ),
         actions: [
           IconButton(
-            tooltip: 'Limpiar conversación',
-            onPressed: () async {
-              await store.clearChat();
-              if (mounted) setState(() => messages.clear());
-            },
-            icon: const Icon(Icons.delete_sweep_outlined),
+            tooltip: 'Nuevo chat',
+            onPressed: sending ? null : _newChat,
+            icon: const Icon(Icons.add_comment_outlined),
+          ),
+          IconButton(
+            tooltip: 'Historial',
+            onPressed: sending ? null : _history,
+            icon: const Icon(Icons.history),
+          ),
+          IconButton(
+            tooltip: 'Exportar PDF',
+            onPressed:
+                session == null ? null : () => _export(session),
+            icon: const Icon(Icons.picture_as_pdf_outlined),
           ),
         ],
       ),
       body: SafeArea(
-        child: Column(
-          children: [
-            if (!embeddingReady)
-              MaterialBanner(
-                content: Text(
-                  downloading
-                      ? 'Preparando el modelo de embeddings… ${(downloadProgress * 100).round()}%'
-                      : 'Activa la memoria semántica para buscar por significado en todas las notas.',
-                ),
-                leading: const Icon(Icons.memory_outlined),
-                actions: [
-                  TextButton(
-                    onPressed: downloading ? null : downloadEmbeddings,
-                    child: const Text('Descargar'),
+        child: loading
+            ? const Center(child: CircularProgressIndicator())
+            : Column(
+                children: [
+                  Padding(
+                    padding:
+                        const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                    child: SegmentedButton<String>(
+                      segments: const [
+                        ButtonSegment(
+                          value: 'fast',
+                          label: Text('Fast'),
+                        ),
+                        ButtonSegment(
+                          value: 'normal',
+                          label: Text('Normal'),
+                        ),
+                        ButtonSegment(
+                          value: 'deep',
+                          label: Text('Deep'),
+                        ),
+                      ],
+                      selected: {responseMode},
+                      onSelectionChanged: sending
+                          ? null
+                          : (values) =>
+                              _setResponseMode(values.first),
+                    ),
                   ),
-                ],
-              ),
-            Expanded(
-              child: loading
-                  ? const Center(child: CircularProgressIndicator())
-                  : ListView.builder(
-                      controller: scroll,
-                      padding: const EdgeInsets.fromLTRB(14, 12, 14, 20),
-                      itemCount: messages.length + (sending ? 1 : 0),
-                      itemBuilder: (_, index) {
-                        if (index == messages.length) {
-                          return const Align(
-                            alignment: Alignment.centerLeft,
-                            child: Padding(
-                              padding: EdgeInsets.all(12),
-                              child: CircularProgressIndicator(),
-                            ),
-                          );
-                        }
-                        final m = messages[index];
-                        final user = m['role'] == 'user';
-                        final sourceNotes = _sourceKeys(m)
-                            .map(_noteForKey)
-                            .whereType<Note>()
-                            .toList();
-                        return Align(
-                          alignment:
-                              user ? Alignment.centerRight : Alignment.centerLeft,
-                          child: ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 520),
-                            child: Card(
-                              child: Padding(
-                                padding: const EdgeInsets.all(12),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    SelectableText(
-                                      (m['text'] ?? '').toString(),
-                                    ),
-                                    if (!user && sourceNotes.isNotEmpty) ...[
-                                      const SizedBox(height: 10),
-                                      const Text(
-                                        'Fuentes',
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 6),
-                                      Wrap(
-                                        spacing: 6,
-                                        runSpacing: 6,
-                                        children: [
-                                          for (var i = 0;
-                                              i < sourceNotes.length;
-                                              i++)
-                                            ActionChip(
-                                              avatar: const Icon(
-                                                Icons.notes_outlined,
-                                                size: 16,
-                                              ),
-                                              label: Text(
-                                                '[N${i + 1}] ${sourceNotes[i].title}',
-                                                overflow: TextOverflow.ellipsis,
-                                              ),
-                                              onPressed: () => Navigator.push(
-                                                context,
-                                                MaterialPageRoute(
-                                                  builder: (_) => NoteDetailPage(
-                                                    note: sourceNotes[i],
-                                                    api: widget.api,
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                        ],
-                                      ),
-                                    ],
-                                  ],
-                                ),
+                  SwitchListTile(
+                    dense: true,
+                    title: const Text('Usar tus notas'),
+                    subtitle: Text(
+                      useNotes
+                          ? 'Puede consultar notas, OCR y entidades cuando sean relevantes.'
+                          : 'Chat general sin consultar tu base de notas.',
+                    ),
+                    value: useNotes,
+                    onChanged: sending ? null : _setUseNotes,
+                  ),
+                  if (useNotes && !embeddingReady)
+                    MaterialBanner(
+                      content: Text(
+                        downloading
+                            ? 'Preparando embeddings… ${(downloadProgress * 100).round()}%'
+                            : 'Activa la memoria semántica para buscar por significado.',
+                      ),
+                      leading: const Icon(Icons.memory_outlined),
+                      actions: [
+                        TextButton(
+                          onPressed:
+                              downloading ? null : downloadEmbeddings,
+                          child: const Text('Descargar'),
+                        ),
+                      ],
+                    ),
+                  const Divider(height: 1),
+                  Expanded(
+                    child: KnowledgeChatTranscript(
+                      messages:
+                          session?.messages ?? const [],
+                      participantName: _participantName,
+                      api: widget.api,
+                      notes: notes,
+                      emptyText: widget.entity == null
+                          ? 'Pregunta cualquier cosa. Puedes consultar tus notas, clientes, compras, tracking y OCR.'
+                          : 'Pregunta cualquier cosa sobre ${widget.entity!.name}.',
+                      liveResponseSeconds: _responseSeconds,
+                      isResponding: sending,
+                    ),
+                  ),
+                  SafeArea(
+                    top: false,
+                    child: Padding(
+                      padding:
+                          const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: input,
+                              minLines: 1,
+                              maxLines: 5,
+                              textInputAction:
+                                  TextInputAction.newline,
+                              decoration: InputDecoration(
+                                hintText: widget.entity == null
+                                    ? 'Pregúntale cualquier cosa…'
+                                    : 'Pregunta sobre ${widget.entity!.name}…',
                               ),
                             ),
                           ),
-                        );
-                      },
-                    ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: input,
-                      minLines: 1,
-                      maxLines: 5,
-                      onSubmitted: (_) => send(),
-                      decoration: InputDecoration(
-                        hintText: entity == null
-                            ? 'Pregunta por María, un tracking, una compra…'
-                            : 'Pregunta cualquier cosa sobre ${entity.name}',
-                        border: const OutlineInputBorder(),
+                          const SizedBox(width: 8),
+                          sending
+                              ? IconButton(
+                                  tooltip: 'Detener',
+                                  onPressed: _stop,
+                                  icon: const Icon(
+                                    Icons.stop_circle_outlined,
+                                  ),
+                                )
+                              : IconButton(
+                                  tooltip: 'Enviar',
+                                  onPressed: send,
+                                  icon:
+                                      const Icon(Icons.send_rounded),
+                                ),
+                        ],
                       ),
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  IconButton.filled(
-                    onPressed: sending ? null : send,
-                    icon: const Icon(Icons.send),
-                  ),
                 ],
               ),
-            ),
-          ],
-        ),
       ),
     );
   }
