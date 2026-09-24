@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../models/note.dart';
 import '../services/api_service.dart';
 import '../services/local_ai_service.dart';
+import '../services/paqueteria_purchase_sync_service.dart';
 import 'ai_settings_page.dart';
 import 'new_note_page.dart';
 import 'note_detail_page.dart';
@@ -58,6 +59,9 @@ class _HomePageState extends State<HomePage> {
       error = 'Configura el servidor para comenzar. $e';
     } finally {
       if (mounted) setState(() => loading = false);
+    }
+    if (error == null) {
+      unawaited(PaqueteriaPurchaseSyncService(api).flush());
     }
     if (runLocalAi && error == null) unawaited(_processPendingLocal());
   }
@@ -280,6 +284,16 @@ class _HomePageState extends State<HomePage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       const SizedBox(height: 4),
+                      if (n.isPurchase && n.customerName.isNotEmpty) ...[
+                        Text(
+                          n.customerPhone.isEmpty
+                              ? n.customerName
+                              : '${n.customerName} · ${n.customerPhone}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 4),
+                      ],
                       Text(n.content.replaceAll('\n', ' '), maxLines: 2, overflow: TextOverflow.ellipsis),
                       const SizedBox(height: 6),
                       Text(
