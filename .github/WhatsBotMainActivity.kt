@@ -10,5 +10,9 @@ class MainActivity : FlutterActivity() {
             applicationContext,
             flutterEngine.dartExecutor.binaryMessenger
         )
+        LocalAiManagerBridge.register(
+            applicationContext,
+            flutterEngine.dartExecutor.binaryMessenger
+        )
     }
 }
