@@ -25,7 +25,7 @@ class KnowledgeStore {
     final docs = await getApplicationDocumentsDirectory();
     final db = await openDatabase(
       '${docs.path}/whatsbot_knowledge.db',
-      version: 1,
+      version: 2,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE note_state(
@@ -79,9 +79,21 @@ class KnowledgeStore {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             role TEXT NOT NULL,
             text TEXT NOT NULL,
+            sources_json TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL
           )
         ''');
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          final columns = await db.rawQuery('PRAGMA table_info(chat_messages)');
+          final names = columns.map((e) => e['name']?.toString()).toSet();
+          if (!names.contains('sources_json')) {
+            await db.execute(
+              "ALTER TABLE chat_messages ADD COLUMN sources_json TEXT NOT NULL DEFAULT '[]'",
+            );
+          }
+        }
       },
     );
     _database = db;
@@ -396,11 +408,16 @@ class KnowledgeStore {
     return list.isEmpty ? null : list.first;
   }
 
-  Future<void> addChatMessage(String role, String text) async {
+  Future<void> addChatMessage(
+    String role,
+    String text, {
+    List<String> sourceKeys = const <String>[],
+  }) async {
     final db = await database;
     await db.insert('chat_messages', {
       'role': role,
       'text': text,
+      'sources_json': jsonEncode(sourceKeys),
       'created_at': DateTime.now().toUtc().toIso8601String(),
     });
   }
