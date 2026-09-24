@@ -31,6 +31,8 @@ ACK_ENABLED = os.getenv("ACK_ENABLED", "false").lower() in {"1", "true", "yes", 
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "whatsbot.db"
+MEDIA_DIR = DATA_DIR / "whatsapp_media"
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="WhatsBot Backend", version="1.0.0")
 
@@ -346,6 +348,31 @@ def persist_purchase_media(url: str, content_type: str, stem: str) -> str:
     return name
 
 
+def persist_note_media(url: str, content_type: str, stem: str) -> str:
+    if not url:
+        return ""
+    raw = download_twilio_media(url)
+    if len(raw) > 12 * 1024 * 1024:
+        return ""
+    c = (content_type or "").lower()
+    if "png" in c:
+        ext = ".png"
+    elif "webp" in c:
+        ext = ".webp"
+    elif "pdf" in c:
+        ext = ".pdf"
+    elif "audio" in c:
+        ext = ".m4a"
+    elif "video" in c:
+        ext = ".mp4"
+    else:
+        ext = ".jpg"
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", stem)[:80] or "whatsapp"
+    name = f"{safe}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}{ext}"
+    (MEDIA_DIR / name).write_bytes(raw)
+    return f"/api/media/{name}"
+
+
 def normalize_yes_no(value: str) -> str:
     clean = value.strip().lower()
     clean = (
@@ -506,6 +533,15 @@ def health() -> dict[str, Any]:
             TWILIO_ACCOUNT_SID and TWILIO_API_KEY_SID and TWILIO_API_SECRET
         ),
     }
+
+
+@app.get("/api/media/{name}", dependencies=[Depends(require_api_key)])
+def api_media(name: str) -> FileResponse:
+    safe = Path(name).name
+    path = MEDIA_DIR / safe
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Media not found")
+    return FileResponse(path)
 
 
 @app.get("/api/config", dependencies=[Depends(require_api_key)])
@@ -971,6 +1007,16 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
             return Response(content=str(response), media_type="application/xml")
 
     media_type = infer_message_type(content_type, num_media)
+    persisted_media = media_url
+    if num_media > 0 and media_url:
+        try:
+            persisted_media = persist_note_media(
+                media_url,
+                content_type,
+                message_sid or "whatsapp",
+            )
+        except Exception:
+            persisted_media = media_url
     title = make_title(body, media_type)
     content = body
     if not content and num_media > 0:
@@ -1003,7 +1049,7 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
                 content,
                 body,
                 media_type,
-                media_url,
+                persisted_media,
                 sender,
                 message_sid,
                 utc_now(),
