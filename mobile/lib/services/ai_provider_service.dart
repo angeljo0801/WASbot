@@ -210,12 +210,36 @@ class AiProviderService {
         modelPath: settingsValue.deviceModelPath,
         autoProcess: settingsValue.autoProcess,
       );
-      return localAi.ask(
-        system: system,
-        prompt: prompt,
-        maxTokens: maxTokens,
-        temperature: temperature,
-      );
+      try {
+        return await localAi.ask(
+          system: system,
+          prompt: prompt,
+          maxTokens: maxTokens,
+          temperature: temperature,
+        );
+      } catch (localError) {
+        // Si la carga directa del GGUF falla, intenta reutilizar el modelo ya
+        // cargado por Local AI Manager. Evita cargar el mismo modelo dos veces
+        // en RAM y permite que el chat siga funcionando.
+        try {
+          final answer = await _askManager(system: system, prompt: prompt);
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('ai_provider', AiProvider.manager);
+          await localAi.saveSettings(
+            mode: AiMode.server,
+            modelPath: settingsValue.deviceModelPath,
+            autoProcess: settingsValue.autoProcess,
+          );
+          return answer;
+        } catch (_) {
+          throw StateError(
+            'El modelo local no pudo cargarse en WhatsBot y Local AI Manager '
+            'tampoco respondió. Abre Ajustes de IA, prueba Local AI Manager '
+            'o selecciona otro GGUF. Detalle: ' +
+                localError.runtimeType.toString(),
+          );
+        }
+      }
     }
     if (settingsValue.provider == AiProvider.manager) {
       return _askManager(system: system, prompt: prompt);
