@@ -183,7 +183,7 @@ class LocalAiService {
     final sourceText = note.content.trim().isNotEmpty
         ? note.content.trim()
         : note.originalText.trim();
-    final system = '''Eres el organizador privado de WhatsBot. Recibes una nota enviada por WhatsApp. Devuelve SOLO JSON válido, sin markdown, con estas claves exactas: title, content, category, tags. category debe ser exactamente una de: Inbox, Trabajo, Personal, Compras, Gastos, Ideas, Documentos, Recordatorios, Fotos. tags debe ser un array de 0 a 6 strings cortos. Conserva exactamente nombres, fechas, cantidades y precios cuando existan. Corrige redacción y OCR solo cuando sea obvio. No inventes datos.''';
+    final system = '''Eres el organizador privado de WhatsBot. Recibes una nota enviada por WhatsApp. Devuelve SOLO JSON válido, sin markdown, con estas claves exactas: title, content, category, tags. category debe ser exactamente una de: Inbox, Clientes, Trabajo, Personal, Compras, Gastos, Ideas, Documentos, Recordatorios, Fotos. Si la nota representa un contacto o datos de un cliente, usa Clientes. tags debe ser un array de 0 a 6 strings cortos. Conserva exactamente nombres, fechas, cantidades y precios cuando existan. Corrige redacción y OCR solo cuando sea obvio. No inventes datos.''';
     final user = '''Tipo de mensaje: ${note.messageType}\nTexto original: ${note.originalText}\nContenido disponible: $sourceText''';
 
     final buffer = StringBuffer();
