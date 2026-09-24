@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/api_service.dart';
+import '../services/background_service.dart';
 import 'backup_page.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -26,6 +27,8 @@ class _SettingsPageState extends State<SettingsPage> {
   bool? serverOnline;
   bool? whatsappConnected;
   Map<String, dynamic>? combo;
+  bool backgroundEnabled = true;
+  bool backgroundBusy = false;
 
   @override
   void initState() {
@@ -45,6 +48,7 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> load() async {
     final s = await widget.api.settings();
     final wa = await widget.api.whatsappSettings();
+    final background = await WhatsBotBackgroundService.preferenceEnabled();
     if (!mounted) return;
     setState(() {
       url.text = s['url'] ?? '';
@@ -54,6 +58,7 @@ class _SettingsPageState extends State<SettingsPage> {
       final raw = wa['allowed_numbers'];
       allowedNumbers = raw is List ? raw.map((e) => e.toString()).toList() : <String>[];
       whatsappConnected = wa['connected'] as bool?;
+      backgroundEnabled = background;
       loading = false;
     });
   }
@@ -92,6 +97,28 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> removeAllowedNumber(String number) async {
     setState(() => allowedNumbers.remove(number));
     await syncWhatsAppSettings(notify: true);
+  }
+
+  Future<void> setBackgroundEnabled(bool value) async {
+    if (backgroundBusy) return;
+    setState(() => backgroundBusy = true);
+    final ok = await WhatsBotBackgroundService.setEnabled(value);
+    if (!mounted) return;
+    setState(() {
+      backgroundBusy = false;
+      backgroundEnabled = value && ok;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          value
+              ? (ok
+                  ? 'WhatsBot seguirá trabajando cuando esté minimizado o la pantalla esté apagada.'
+                  : 'No pude activar el modo en segundo plano. Revisa los permisos y la optimización de batería.')
+              : 'Modo en segundo plano desactivado.',
+        ),
+      ),
+    );
   }
 
   Future<void> openLink(String value) async {
@@ -390,6 +417,20 @@ class _SettingsPageState extends State<SettingsPage> {
                           context,
                           MaterialPageRoute(builder: (_) => const BackupPage()),
                         ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Card(
+                      child: SwitchListTile(
+                        secondary: const Icon(Icons.sync_lock_outlined),
+                        title: const Text('Trabajar en segundo plano'),
+                        subtitle: const Text(
+                          'Mantiene WhatsBot activo para sincronizar mensajes, procesar notas e IA automática aun cuando minimices la app o apagues la pantalla. Android mostrará una notificación mientras esté activo.',
+                        ),
+                        value: backgroundEnabled,
+                        onChanged: backgroundBusy
+                            ? null
+                            : (value) => setBackgroundEnabled(value),
                       ),
                     ),
                     const Divider(height: 40),
