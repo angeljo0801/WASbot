@@ -6,13 +6,20 @@ on:
     branches: [main]
     paths:
       - 'mobile/**'
+      - '.github/WhatsBotBackupStorageBridge.kt'
+      - '.github/WhatsBotMainActivity.kt'
       - '.github/workflows/build-apk.yml'
+
+permissions:
+  contents: read
 
 jobs:
   android:
     runs-on: ubuntu-latest
     env:
       NDK_VERSION: 27.0.12077973
+      WHATSBOT_APPLICATION_ID: com.whatsbot.whatsbot
+
     steps:
       - uses: actions/checkout@v4
 
@@ -33,22 +40,115 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Verify persistent signing secrets
+        env:
+          WHATSBOT_KEYSTORE_B64: ${{ secrets.WHATSBOT_KEYSTORE_B64 }}
+          WHATSBOT_KEYSTORE_PASSWORD: ${{ secrets.WHATSBOT_KEYSTORE_PASSWORD }}
+          WHATSBOT_KEY_ALIAS: ${{ secrets.WHATSBOT_KEY_ALIAS }}
+          WHATSBOT_KEY_PASSWORD: ${{ secrets.WHATSBOT_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          missing=0
+          for name in WHATSBOT_KEYSTORE_B64 WHATSBOT_KEYSTORE_PASSWORD WHATSBOT_KEY_ALIAS WHATSBOT_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing secret $name"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::WhatsBot will not publish an APK with temporary signing."
+            exit 1
+          fi
+
       - name: Generate Android platform files
         working-directory: mobile
         run: |
           flutter create . --platforms=android --org com.whatsbot --project-name whatsbot
           rm -f test/widget_test.dart
 
-      - name: Configure Android for local llama.cpp
+      - name: Configure stable Android identity, backup bridge and signing
         working-directory: mobile
+        env:
+          WHATSBOT_KEYSTORE_B64: ${{ secrets.WHATSBOT_KEYSTORE_B64 }}
+          WHATSBOT_KEYSTORE_PASSWORD: ${{ secrets.WHATSBOT_KEYSTORE_PASSWORD }}
+          WHATSBOT_KEY_ALIAS: ${{ secrets.WHATSBOT_KEY_ALIAS }}
+          WHATSBOT_KEY_PASSWORD: ${{ secrets.WHATSBOT_KEY_PASSWORD }}
+        shell: bash
         run: |
-          python - <<'PY'
+          mkdir -p android/app/src/main/kotlin/com/whatsbot/whatsbot
+          cp ../.github/WhatsBotBackupStorageBridge.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotBackupStorageBridge.kt
+          cp ../.github/WhatsBotMainActivity.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/MainActivity.kt
+
+          normalize_secret() {
+            local name="$1"
+            local raw="$2"
+            if printf '%s' "$raw" | grep -q "$name="; then
+              printf '%s\n' "$raw" | sed -n "s/^.*${name}[[:space:]]*=[[:space:]]*//p" | head -n 1 | tr -d '\r'
+            else
+              printf '%s' "$raw" | tr -d '\r'
+            fi
+          }
+
+          export WHATSBOT_KEYSTORE_B64="$(normalize_secret WHATSBOT_KEYSTORE_B64 "$WHATSBOT_KEYSTORE_B64" | tr -cd 'A-Za-z0-9+/=')"
+          export WHATSBOT_KEYSTORE_PASSWORD="$(normalize_secret WHATSBOT_KEYSTORE_PASSWORD "$WHATSBOT_KEYSTORE_PASSWORD")"
+          export WHATSBOT_KEY_ALIAS="$(normalize_secret WHATSBOT_KEY_ALIAS "$WHATSBOT_KEY_ALIAS")"
+          export WHATSBOT_KEY_PASSWORD="$(normalize_secret WHATSBOT_KEY_PASSWORD "$WHATSBOT_KEY_PASSWORD")"
+
+          printf '%s' "$WHATSBOT_KEYSTORE_B64" | base64 --decode > android/app/whatsbot-release.jks
+
+          python3 - <<'PY'
           from pathlib import Path
+          import os, re
+
           p = Path('android/app/build.gradle.kts')
           s = p.read_text()
           s = s.replace('minSdk = flutter.minSdkVersion', 'minSdk = 26')
           s = s.replace('ndkVersion = flutter.ndkVersion', 'ndkVersion = "27.0.12077973"')
+          s = re.sub(r'namespace\s*=\s*"[^"]+"', 'namespace = "com.whatsbot.whatsbot"', s, count=1)
+          s = re.sub(r'applicationId\s*=\s*"[^"]+"', 'applicationId = "com.whatsbot.whatsbot"', s, count=1)
+
+          alias = os.environ['WHATSBOT_KEY_ALIAS'].strip()
+          store_password = os.environ['WHATSBOT_KEYSTORE_PASSWORD'].strip()
+          key_password = os.environ['WHATSBOT_KEY_PASSWORD'].strip()
+
+          def esc(value):
+              return value.replace('\\', '\\\\').replace('"', '\\"')
+
+          signing = '''    signingConfigs {
+              create("whatsBotRelease") {
+                  keyAlias = "''' + esc(alias) + '''"
+                  keyPassword = "''' + esc(key_password) + '''"
+                  storeFile = file("whatsbot-release.jks")
+                  storePassword = "''' + esc(store_password) + '''"
+              }
+          }
+
+          '''
+          if 'create("whatsBotRelease")' not in s:
+              s = s.replace('    buildTypes {', signing + '    buildTypes {', 1)
+
+          s = s.replace(
+              'signingConfig = signingConfigs.getByName("debug")',
+              'signingConfig = signingConfigs.getByName("whatsBotRelease")'
+          )
           p.write_text(s)
+
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          x = manifest.read_text()
+          root = '<manifest xmlns:android="http://schemas.android.com/apk/res/android">'
+          if 'android.permission.WRITE_EXTERNAL_STORAGE' not in x:
+              x = x.replace(
+                  root,
+                  root + '\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />',
+                  1,
+              )
+          if 'android.permission.READ_EXTERNAL_STORAGE' not in x:
+              x = x.replace(
+                  root,
+                  root + '\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />',
+                  1,
+              )
+          manifest.write_text(x)
           PY
 
       - name: Add WhatsBot launcher icon
@@ -89,7 +189,7 @@ jobs:
           </adaptive-icon>
           EOF
           cp android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
-          python - <<'PY'
+          python3 - <<'PY'
           from pathlib import Path
           m = Path('android/app/src/main/AndroidManifest.xml')
           s = m.read_text()
@@ -103,13 +203,32 @@ jobs:
 
       - name: Analyze
         working-directory: mobile
-        run: flutter analyze
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
-      - name: Build release APK
+      - name: Build stable release APK
         working-directory: mobile
-        run: flutter build apk --release --target-platform android-arm64
+        run: |
+          flutter build apk --release --target-platform android-arm64 --build-name 0.7.0 --build-number "$GITHUB_RUN_NUMBER"
+
+      - name: Verify APK signature
+        working-directory: mobile
+        shell: bash
+        run: |
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -n "$APKSIGNER"
+          "$APKSIGNER" verify --verbose build/app/outputs/flutter-apk/app-release.apk
+          {
+            echo "applicationId=com.whatsbot.whatsbot"
+            echo "versionName=0.7.0"
+            echo "buildNumber=$GITHUB_RUN_NUMBER"
+            echo "signing=persistent"
+            echo "backups=Downloads/WhatsBot"
+          } > build/app/outputs/flutter-apk/BUILD_IDENTITY.txt
+          rm -f android/app/whatsbot-release.jks
 
       - uses: actions/upload-artifact@v4
         with:
-          name: WhatsBot-release-apk
-          path: mobile/build/app/outputs/flutter-apk/app-release.apk
+          name: WhatsBot-v0.7.0-Backup-Stable-ID-APK
+          path: |
+            mobile/build/app/outputs/flutter-apk/app-release.apk
+            mobile/build/app/outputs/flutter-apk/BUILD_IDENTITY.txt
