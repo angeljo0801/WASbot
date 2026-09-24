@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -477,6 +478,23 @@ class ApiService {
         .timeout(const Duration(seconds: 12));
     if (r.statusCode != 204) {
       throw Exception('No se pudo borrar (${r.statusCode})');
+    }
+  }
+
+  Future<Uint8List?> fetchMediaBytes(String path) async {
+    final url = await baseUrl;
+    if (url.isEmpty || path.trim().isEmpty) return null;
+    try {
+      final uri = path.startsWith('http')
+          ? Uri.parse(path)
+          : Uri.parse(url).resolve(path);
+      final r = await http
+          .get(uri, headers: await _headers())
+          .timeout(const Duration(seconds: 20));
+      if (r.statusCode != 200 || r.bodyBytes.isEmpty) return null;
+      return r.bodyBytes;
+    } catch (_) {
+      return null;
     }
   }
 
