@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../models/note.dart';
 import '../services/api_service.dart';
+import '../services/ai_provider_service.dart';
 import '../services/local_ai_service.dart';
 import '../services/paqueteria_purchase_sync_service.dart';
 import 'ai_settings_page.dart';
@@ -22,6 +23,7 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   final api = ApiService();
   final localAi = LocalAiService();
+  late final AiProviderService ai;
   final search = TextEditingController();
   final categories = const [
     'Todas', 'Inbox', 'Trabajo', 'Personal', 'Compras', 'Gastos',
@@ -31,15 +33,17 @@ class _HomePageState extends State<HomePage> {
   String category = 'Todas';
   List<Note> notes = [];
   bool loading = true;
-  bool localAiRunning = false;
-  int localAiDone = 0;
-  int localAiTotal = 0;
+  bool aiRunning = false;
+  int aiDone = 0;
+  int aiTotal = 0;
+  String aiRunningLabel = 'IA';
   int paqueteriaPending = 0;
   String? error;
 
   @override
   void initState() {
     super.initState();
+    ai = AiProviderService(localAi: localAi);
     refresh();
   }
 
@@ -70,56 +74,76 @@ class _HomePageState extends State<HomePage> {
         if (mounted) setState(() => paqueteriaPending = pending);
       }());
     }
-    if (runLocalAi && error == null) unawaited(_processPendingLocal());
+    if (runLocalAi && error == null) unawaited(_processPendingAi());
   }
 
-  Future<void> _processPendingLocal({bool force = false}) async {
-    if (localAiRunning) return;
-    final settings = await localAi.settings();
-    if (settings.mode != AiMode.local || settings.modelPath.isEmpty) return;
+  Future<void> _processPendingAi({bool force = false}) async {
+    if (aiRunning) return;
+    final settings = await ai.settings();
+    if (settings.provider == AiProvider.rules) return;
     if (!settings.autoProcess && !force) return;
+    if (settings.provider == AiProvider.device &&
+        settings.deviceModelPath.trim().isEmpty) {
+      return;
+    }
 
+    final sourceId = ai.sourceId(settings.provider);
     final candidates = notes
-        .where((n) => n.source == 'whatsapp' && (force || n.aiProvider != 'local'))
+        .where(
+          (n) =>
+              n.source == 'whatsapp' &&
+              (force || n.aiProvider != sourceId),
+        )
         .take(20)
         .toList();
     if (candidates.isEmpty) return;
 
     if (mounted) {
       setState(() {
-        localAiRunning = true;
-        localAiDone = 0;
-        localAiTotal = candidates.length;
+        aiRunning = true;
+        aiDone = 0;
+        aiTotal = candidates.length;
+        aiRunningLabel = ai.label(settings.provider);
       });
     }
 
     try {
-      await localAi.loadModel(settings.modelPath);
+      if (settings.provider == AiProvider.device) {
+        await localAi.loadModel(settings.deviceModelPath);
+      }
       for (final note in candidates) {
         try {
-          final organized = await localAi.organize(note);
+          final organized = await ai.organize(note);
           await api.updateNoteFromAi(
             id: note.id,
             title: organized.title,
             content: organized.content,
             category: organized.category,
             tags: organized.tags,
-            aiProvider: 'local',
+            aiProvider: sourceId,
           );
         } catch (e) {
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('IA local: no se pudo organizar “${note.title}”: $e')),
+              SnackBar(
+                content: Text(
+                  ai.label(settings.provider) +
+                      ': no se pudo organizar “' +
+                      note.title +
+                      '”: ' +
+                      e.toString(),
+                ),
+              ),
             );
           }
           break;
         } finally {
-          if (mounted) setState(() => localAiDone++);
+          if (mounted) setState(() => aiDone++);
         }
       }
       if (mounted) await refresh(runLocalAi: false);
     } finally {
-      if (mounted) setState(() => localAiRunning = false);
+      if (mounted) setState(() => aiRunning = false);
     }
   }
 
@@ -167,7 +191,10 @@ class _HomePageState extends State<HomePage> {
       };
 
   String aiLabel(Note n) => switch (n.aiProvider) {
-        'local' => 'IA local',
+        'openai' => 'OpenAI',
+        'gemini' => 'Gemini',
+        'local_server' => 'IA local',
+        'local' => 'GGUF local',
         'server' => 'IA servidor',
         _ => 'Reglas',
       };
@@ -198,7 +225,7 @@ class _HomePageState extends State<HomePage> {
                   builder: (_) => AiSettingsPage(
                     api: api,
                     localAi: localAi,
-                    onProcessNow: () => _processPendingLocal(force: true),
+                    onProcessNow: () => _processPendingAi(force: true),
                   ),
                 ),
               );
@@ -249,15 +276,26 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
               ),
-            if (localAiRunning)
+            if (aiRunning)
               Card(
                 child: Padding(
                   padding: const EdgeInsets.all(14),
                   child: Row(
                     children: [
-                      const SizedBox.square(dimension: 22, child: CircularProgressIndicator(strokeWidth: 2)),
+                      const SizedBox.square(
+                        dimension: 22,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
                       const SizedBox(width: 12),
-                      Expanded(child: Text('IA local organizando notas… $localAiDone/$localAiTotal')),
+                      Expanded(
+                        child: Text(
+                          aiRunningLabel +
+                              ' organizando notas… ' +
+                              aiDone.toString() +
+                              '/' +
+                              aiTotal.toString(),
+                        ),
+                      ),
                     ],
                   ),
                 ),
