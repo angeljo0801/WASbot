@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'screens/home_page.dart';
 import 'services/backup_service.dart';
+import 'services/background_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -9,6 +12,9 @@ Future<void> main() async {
     await WhatsBotBackupService.autoBackupIfDue();
   } catch (_) {}
   runApp(const WhatsBotApp());
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    unawaited(WhatsBotBackgroundService.restore());
+  });
 }
 
 class WhatsBotApp extends StatelessWidget {
