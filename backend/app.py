@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -8,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
@@ -72,6 +73,20 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS config (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS purchase_sync (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                external_id TEXT NOT NULL UNIQUE,
+                customer_name TEXT NOT NULL DEFAULT '',
+                customer_phone TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                store TEXT NOT NULL DEFAULT 'WhatsBot',
+                total REAL NOT NULL DEFAULT 0,
+                photo_files TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             """
         )
@@ -237,6 +252,23 @@ class SendMessage(BaseModel):
     body: str
 
 
+class PurchasePhoto(BaseModel):
+    name: str = "photo.jpg"
+    data: str
+
+
+class PurchaseSyncCreate(BaseModel):
+    external_id: str
+    customer_name: str
+    customer_phone: str = ""
+    title: str = ""
+    description: str = ""
+    store: str = "WhatsBot"
+    total: float = 0
+    photos: list[PurchasePhoto] = Field(default_factory=list)
+    created_at: str = ""
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {
@@ -352,6 +384,142 @@ def delete_note(note_id: int) -> Response:
         conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
         conn.commit()
     return Response(status_code=204)
+
+
+def purchase_row(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        files = json.loads(row["photo_files"] or "[]")
+    except Exception:
+        files = []
+    return {
+        "id": row["id"],
+        "external_id": row["external_id"],
+        "customer_name": row["customer_name"],
+        "customer_phone": row["customer_phone"],
+        "title": row["title"],
+        "description": row["description"],
+        "store": row["store"],
+        "total": row["total"],
+        "photo_urls": [
+            f"/api/purchases/{row['id']}/photos/{i}" for i in range(len(files))
+        ],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+@app.post("/api/purchases", status_code=201, dependencies=[Depends(require_api_key)])
+def create_or_update_purchase(payload: PurchaseSyncCreate) -> dict[str, Any]:
+    external_id = payload.external_id.strip()
+    if not external_id:
+        raise HTTPException(status_code=400, detail="external_id is required")
+    media_dir = DATA_DIR / "purchase_media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    now = utc_now()
+    with closing(db()) as conn:
+        existing = conn.execute(
+            "SELECT * FROM purchase_sync WHERE external_id = ?",
+            (external_id,),
+        ).fetchone()
+        purchase_id = existing["id"] if existing else None
+        previous_files: list[str] = []
+        if existing:
+            try:
+                previous_files = json.loads(existing["photo_files"] or "[]")
+            except Exception:
+                previous_files = []
+
+        new_files: list[str] = []
+        for i, photo in enumerate(payload.photos):
+            try:
+                raw = base64.b64decode(photo.data, validate=True)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid photo {i}") from exc
+            if len(raw) > 8 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="Photo too large")
+            suffix = Path(photo.name).suffix.lower()
+            if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+                suffix = ".jpg"
+            safe_external = re.sub(r"[^A-Za-z0-9_-]", "_", external_id)[:80]
+            filename = f"{safe_external}_{i}{suffix}"
+            (media_dir / filename).write_bytes(raw)
+            new_files.append(filename)
+
+        if not new_files:
+            new_files = previous_files
+
+        values = (
+            payload.customer_name.strip(),
+            normalize_phone(payload.customer_phone),
+            payload.title.strip(),
+            payload.description.strip(),
+            payload.store.strip() or "WhatsBot",
+            float(payload.total or 0),
+            json.dumps(new_files),
+            payload.created_at.strip() or (existing["created_at"] if existing else now),
+            now,
+            external_id,
+        )
+        if existing:
+            conn.execute(
+                """
+                UPDATE purchase_sync
+                SET customer_name=?, customer_phone=?, title=?, description=?,
+                    store=?, total=?, photo_files=?, created_at=?, updated_at=?
+                WHERE external_id=?
+                """,
+                values,
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO purchase_sync(
+                    customer_name, customer_phone, title, description, store,
+                    total, photo_files, created_at, updated_at, external_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM purchase_sync WHERE external_id = ?",
+            (external_id,),
+        ).fetchone()
+        return purchase_row(row)
+
+
+@app.get("/api/purchases", dependencies=[Depends(require_api_key)])
+def list_synced_purchases() -> list[dict[str, Any]]:
+    with closing(db()) as conn:
+        rows = conn.execute(
+            "SELECT * FROM purchase_sync ORDER BY datetime(created_at) DESC, id DESC"
+        ).fetchall()
+        return [purchase_row(row) for row in rows]
+
+
+@app.get(
+    "/api/purchases/{purchase_id}/photos/{photo_index}",
+    dependencies=[Depends(require_api_key)],
+)
+def get_purchase_photo(purchase_id: int, photo_index: int) -> FileResponse:
+    with closing(db()) as conn:
+        row = conn.execute(
+            "SELECT photo_files FROM purchase_sync WHERE id = ?",
+            (purchase_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Purchase not found")
+    try:
+        files = json.loads(row["photo_files"] or "[]")
+    except Exception:
+        files = []
+    if photo_index < 0 or photo_index >= len(files):
+        raise HTTPException(status_code=404, detail="Photo not found")
+    name = Path(str(files[photo_index])).name
+    path = DATA_DIR / "purchase_media" / name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Photo not found")
+    return FileResponse(path)
 
 
 @app.post("/api/whatsapp/send", dependencies=[Depends(require_api_key)])
