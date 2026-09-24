@@ -7,6 +7,7 @@ on:
     paths:
       - 'mobile/**'
       - '.github/WhatsBotBackupStorageBridge.kt'
+      - '.github/WhatsBotLocalAiManagerBridge.kt'
       - '.github/WhatsBotMainActivity.kt'
       - '.github/workflows/build-apk.yml'
 
@@ -57,6 +58,7 @@ jobs:
         run: |
           mkdir -p android/app/src/main/kotlin/com/whatsbot/whatsbot
           cp ../.github/WhatsBotBackupStorageBridge.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotBackupStorageBridge.kt
+          cp ../.github/WhatsBotLocalAiManagerBridge.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/LocalAiManagerBridge.kt
           cp ../.github/WhatsBotMainActivity.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/MainActivity.kt
 
           normalize_secret() {
@@ -126,6 +128,12 @@ jobs:
               x = x.replace(
                   root,
                   root + '\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />',
+                  1,
+              )
+          if 'com.angelapps.local_ai_manager' not in x:
+              x = x.replace(
+                  root,
+                  root + '\n    <queries>\n        <package android:name="com.angelapps.local_ai_manager" />\n    </queries>',
                   1,
               )
           manifest.write_text(x)
@@ -208,7 +216,7 @@ jobs:
       - name: Build stable release APK
         working-directory: mobile
         run: |
-          flutter build apk --release --target-platform android-arm64 --build-name 0.8.0 --build-number "$GITHUB_RUN_NUMBER"
+          flutter build apk --release --target-platform android-arm64 --build-name 0.8.1 --build-number "$GITHUB_RUN_NUMBER"
 
       - name: Verify APK signature
         working-directory: mobile
@@ -219,7 +227,7 @@ jobs:
           "$APKSIGNER" verify --verbose build/app/outputs/flutter-apk/app-release.apk
           {
             echo "applicationId=com.whatsbot.whatsbot"
-            echo "versionName=0.8.0"
+            echo "versionName=0.8.1"
             echo "buildNumber=$GITHUB_RUN_NUMBER"
             echo "signing=persistent"
             echo "backups=Downloads/WhatsBot"
@@ -228,7 +236,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: WhatsBot-v0.8.0-Memora-AI-Selector-APK
+          name: WhatsBot-v0.8.1-Local-Manager-APK
           path: |
             mobile/build/app/outputs/flutter-apk/app-release.apk
             mobile/build/app/outputs/flutter-apk/BUILD_IDENTITY.txt
