@@ -486,6 +486,49 @@ def clear_pending_contacts(sender: str) -> None:
         conn.commit()
 
 
+def save_contact_notes(
+    sender: str,
+    contacts: list[dict[str, str]],
+    message_sid: str | None,
+) -> int:
+    now = utc_now()
+    saved = 0
+    with closing(db()) as conn:
+        for i, contact in enumerate(contacts):
+            name = str(contact.get("name", "")).strip() or "Cliente WhatsApp"
+            phone = normalize_phone(str(contact.get("phone", "")))
+            content = f"Nombre: {name}"
+            if phone:
+                content += f"\nTeléfono: {phone}"
+            contact_sid = (
+                f"{message_sid}:contact:{i}"
+                if message_sid
+                else f"contact:{normalize_phone(sender)}:{name}:{phone}:{i}"
+            )
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO notes(
+                    title, content, original_text, category, tags, source,
+                    message_type, status, ai_source, sender, message_sid, created_at
+                ) VALUES (?, ?, ?, 'Clientes', ?, 'whatsapp',
+                          'contact', 'ready', 'rules', ?, ?, ?)
+                """,
+                (
+                    f"Cliente: {name}",
+                    content,
+                    content,
+                    json.dumps(["contacto", "cliente", "whatsapp"]),
+                    normalize_phone(sender),
+                    contact_sid,
+                    now,
+                ),
+            )
+            if cur.rowcount:
+                saved += 1
+        conn.commit()
+    return saved
+
+
 def approve_contacts_for_paqueteria(
     sender: str,
     contacts: list[dict[str, str]],
@@ -1026,39 +1069,64 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
     media_url = data.get("MediaUrl0") if num_media > 0 else None
     content_type = (data.get("MediaContentType0") or "").lower()
 
-    # WhatsApp shared contacts arrive as vCard media. Parse them and ask first.
-    if operator and num_media > 0 and media_url and (
-        "vcard" in content_type
-        or "x-vcard" in content_type
-        or content_type in {"text/directory", "application/octet-stream"}
-    ):
+    # An authorized operator can share one or more phone contacts directly.
+    # Convert them to synced clients immediately; no outgoing WhatsApp
+    # confirmation is required, so this also works while outbound messaging
+    # is unavailable.
+    if operator:
         contacts: list[dict[str, str]] = []
-        try:
-            raw = download_twilio_media(media_url)
-            text = raw.decode("utf-8-sig", errors="replace")
-            if "BEGIN:VCARD" in text.upper():
-                contacts = parse_vcards(text)
-        except Exception:
-            contacts = []
+
+        if "BEGIN:VCARD" in body.upper():
+            contacts.extend(parse_vcards(body))
+
+        for i in range(num_media):
+            item_type = (data.get(f"MediaContentType{i}") or "").lower()
+            item_url = data.get(f"MediaUrl{i}") or ""
+            if not item_url:
+                continue
+            likely_contact = (
+                "vcard" in item_type
+                or "x-vcard" in item_type
+                or item_type in {
+                    "text/directory",
+                    "text/x-vcard",
+                    "application/vcard",
+                    "application/octet-stream",
+                }
+            )
+            if not likely_contact:
+                continue
+            try:
+                raw = download_twilio_media(item_url)
+                contact_text = raw.decode("utf-8-sig", errors="replace")
+                if "BEGIN:VCARD" in contact_text.upper():
+                    contacts.extend(parse_vcards(contact_text))
+            except Exception:
+                pass
 
         if contacts:
-            save_pending_contacts(sender, contacts)
-            response = MessagingResponse()
-            if len(contacts) == 1:
-                contact = contacts[0]
-                phone_text = f" ({contact['phone']})" if contact.get("phone") else ""
-                response.message(
-                    f"Recibí el contacto {contact['name']}{phone_text}. "
-                    "¿Quieres guardarlo como cliente en Paquetería? Responde Sí o No."
+            deduped: list[dict[str, str]] = []
+            seen_contacts: set[str] = set()
+            for contact in contacts:
+                name = str(contact.get("name", "")).strip() or "Cliente WhatsApp"
+                phone = normalize_phone(str(contact.get("phone", "")))
+                key = phone or re.sub(r"[^a-z0-9]+", "", name.lower())
+                if not key or key in seen_contacts:
+                    continue
+                seen_contacts.add(key)
+                deduped.append({"name": name, "phone": phone})
+
+            if deduped:
+                count = approve_contacts_for_paqueteria(sender, deduped)
+                save_contact_notes(sender, deduped, message_sid)
+                print(
+                    "WHATSAPP_CONTACT "
+                    f"sender={masked_sender} clients_saved={count}"
                 )
-            else:
-                names = ", ".join(c["name"] for c in contacts[:3])
-                extra = f" y {len(contacts) - 3} más" if len(contacts) > 3 else ""
-                response.message(
-                    f"Recibí {len(contacts)} contactos: {names}{extra}. "
-                    "¿Quieres guardarlos como clientes en Paquetería? Responde Sí o No."
+                return Response(
+                    content=str(MessagingResponse()),
+                    media_type="application/xml",
                 )
-            return Response(content=str(response), media_type="application/xml")
 
     if operator:
         purchase_photos: list[str] = []
