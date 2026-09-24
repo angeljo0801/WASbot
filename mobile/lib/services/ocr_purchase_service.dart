@@ -85,6 +85,35 @@ class OcrPurchaseService {
     }
 
     final parsed = StoreOcrParser.parse(text);
+    final warnings = <String>[...parsed.warnings];
+    final otherDrafts = await store.drafts();
+    final normalizedOcr = text
+        .toLowerCase()
+        .replaceAll(RegExp(r'\\s+'), ' ')
+        .trim();
+    for (final other in otherDrafts) {
+      if (other.noteKey == key || other.status == 'discarded') continue;
+      final sameOrder = parsed.orderNumber.trim().isNotEmpty &&
+          other.orderNumber.trim().isNotEmpty &&
+          parsed.orderNumber.trim().toLowerCase() ==
+              other.orderNumber.trim().toLowerCase() &&
+          parsed.store.trim().toLowerCase() ==
+              other.store.trim().toLowerCase();
+      final otherOcr = other.ocrText
+          .toLowerCase()
+          .replaceAll(RegExp(r'\\s+'), ' ')
+          .trim();
+      final sameImageText = normalizedOcr.length > 60 &&
+          otherOcr.length > 60 &&
+          normalizedOcr == otherOcr;
+      if (sameOrder || sameImageText) {
+        warnings.add(
+          'Posible duplicado: ya existe otro borrador con la misma compra. Revísalo antes de confirmar.',
+        );
+        break;
+      }
+    }
+
     final now = DateTime.now();
     final draft = PurchaseDraft(
       id: existing?.id ??
@@ -109,7 +138,7 @@ class OcrPurchaseService {
       items: parsed.items,
       ocrText: text,
       confidence: parsed.confidence,
-      warnings: parsed.warnings,
+      warnings: warnings,
       mediaPath: path,
       status: existing?.status ?? 'pending',
       createdAt: existing?.createdAt ?? now,
@@ -199,7 +228,27 @@ class OcrPurchaseService {
     final pending = await store.latestPendingDraft();
     if (pending == null) return null;
 
-    final updated = pending.copyWith(customerName: name);
+    final warnings = <String>[...pending.warnings];
+    final matches = await store.entities(query: name);
+    final exactOrPrefix = matches
+        .where(
+          (e) =>
+              e.type == 'cliente' &&
+              (e.normalizedName == store.normalizeName(name) ||
+                  e.normalizedName.startsWith(store.normalizeName(name) + ' ')),
+        )
+        .toList();
+    if (exactOrPrefix.length > 1 &&
+        !warnings.any((w) => w.startsWith('Nombre ambiguo:'))) {
+      warnings.add(
+        'Nombre ambiguo: hay varios clientes relacionados con “$name”. Confirma el cliente correcto antes de enviar a Paquetería.',
+      );
+    }
+
+    final updated = pending.copyWith(
+      customerName: name,
+      warnings: warnings,
+    );
     await store.saveDraft(updated);
 
     final entity = await store.upsertEntity(name, type: 'cliente');
