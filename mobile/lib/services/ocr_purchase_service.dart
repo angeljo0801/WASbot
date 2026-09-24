@@ -230,15 +230,20 @@ class OcrPurchaseService {
 
     final warnings = <String>[...pending.warnings];
     final matches = await store.entities(query: name);
+    final normalizedName = store.normalizeName(name);
     final exactOrPrefix = matches
         .where(
           (e) =>
               e.type == 'cliente' &&
-              (e.normalizedName == store.normalizeName(name) ||
-                  e.normalizedName.startsWith(store.normalizeName(name) + ' ')),
+              (e.normalizedName == normalizedName ||
+                  e.normalizedName.startsWith(normalizedName + ' ')),
         )
         .toList();
-    if (exactOrPrefix.length > 1 &&
+
+    var resolvedName = name;
+    if (exactOrPrefix.length == 1) {
+      resolvedName = exactOrPrefix.first.name;
+    } else if (exactOrPrefix.length > 1 &&
         !warnings.any((w) => w.startsWith('Nombre ambiguo:'))) {
       warnings.add(
         'Nombre ambiguo: hay varios clientes relacionados con “$name”. Confirma el cliente correcto antes de enviar a Paquetería.',
@@ -246,12 +251,14 @@ class OcrPurchaseService {
     }
 
     final updated = pending.copyWith(
-      customerName: name,
+      customerName: resolvedName,
       warnings: warnings,
     );
     await store.saveDraft(updated);
 
-    final entity = await store.upsertEntity(name, type: 'cliente');
+    final entity = exactOrPrefix.length == 1
+        ? exactOrPrefix.first
+        : await store.upsertEntity(resolvedName, type: 'cliente');
     await store.linkEntity(
       entity.id,
       pending.noteKey,
