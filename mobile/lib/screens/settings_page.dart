@@ -58,13 +58,40 @@ class _SettingsPageState extends State<SettingsPage> {
     });
   }
 
-  void addAllowedNumber() {
+  Future<bool> syncWhatsAppSettings({bool notify = false}) async {
+    await widget.api.saveSettings(url.text, key.text);
+    final synced = await widget.api.saveWhatsAppSettings(
+      provider: provider,
+      botNumber: botNumber.text,
+      allowedNumbers: allowedNumbers,
+    );
+    if (notify && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            synced
+                ? 'Números autorizados sincronizados con el servidor.'
+                : 'No se pudo sincronizar con el servidor. Revisa la URL y la API key.',
+          ),
+        ),
+      );
+    }
+    return synced;
+  }
+
+  Future<void> addAllowedNumber() async {
     final normalized = widget.api.normalizePhone(newAllowedNumber.text);
     if (normalized.isEmpty) return;
     if (!allowedNumbers.contains(normalized)) {
       setState(() => allowedNumbers.add(normalized));
     }
     newAllowedNumber.clear();
+    await syncWhatsAppSettings(notify: true);
+  }
+
+  Future<void> removeAllowedNumber(String number) async {
+    setState(() => allowedNumbers.remove(number));
+    await syncWhatsAppSettings(notify: true);
   }
 
   Future<void> openLink(String value) async {
@@ -146,12 +173,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> save() async {
     setState(() => saving = true);
-    await widget.api.saveSettings(url.text, key.text);
-    final synced = await widget.api.saveWhatsAppSettings(
-      provider: provider,
-      botNumber: botNumber.text,
-      allowedNumbers: allowedNumbers,
-    );
+    final synced = await syncWhatsAppSettings();
     if (!mounted) return;
     setState(() => saving = false);
     ScaffoldMessenger.of(context).showSnackBar(
@@ -168,6 +190,11 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> testConnection() async {
     setState(() => checking = true);
     await widget.api.saveSettings(url.text, key.text);
+    final synced = await widget.api.saveWhatsAppSettings(
+      provider: provider,
+      botNumber: botNumber.text,
+      allowedNumbers: allowedNumbers,
+    );
     final ok = await widget.api.health();
     Map<String, dynamic>? wa;
     Map<String, dynamic>? comboStatus;
@@ -182,6 +209,15 @@ class _SettingsPageState extends State<SettingsPage> {
       whatsappConnected = wa?['connected'] as bool?;
       combo = comboStatus;
     });
+    if (ok && !synced && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'El servidor responde, pero no pude sincronizar WhatsApp. Revisa la API key.',
+          ),
+        ),
+      );
+    }
   }
 
   Widget comboCard() {
@@ -418,7 +454,7 @@ class _SettingsPageState extends State<SettingsPage> {
                         SizedBox(
                           height: 56,
                           child: FilledButton(
-                            onPressed: addAllowedNumber,
+                            onPressed: () => addAllowedNumber(),
                             child: const Icon(Icons.add),
                           ),
                         ),
@@ -440,7 +476,7 @@ class _SettingsPageState extends State<SettingsPage> {
                             title: Text(number),
                             trailing: IconButton(
                               tooltip: 'Quitar',
-                              onPressed: () => setState(() => allowedNumbers.remove(number)),
+                              onPressed: () => removeAllowedNumber(number),
                               icon: const Icon(Icons.delete_outline),
                             ),
                           ),
