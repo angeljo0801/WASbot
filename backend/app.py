@@ -208,11 +208,30 @@ def send_whatsapp_direct(to_number: str, body: str) -> None:
         from_=f"whatsapp:{from_number}",
         to=f"whatsapp:{to_number}",
         body=body,
+        status_callback="https://wasbot-backend-production.up.railway.app/webhooks/twilio/status",
     )
     print(
         "WHATSAPP_DIAG direct_send "
+        f"sid_tail={str(getattr(msg, 'sid', ''))[-6:]} "
         f"to=***{to_number[-4:]} status={getattr(msg, 'status', '')}"
     )
+
+
+@app.post("/webhooks/twilio/status")
+async def twilio_message_status(request: Request) -> Response:
+    form = await request.form()
+    status = str(form.get("MessageStatus") or "")
+    sid = str(form.get("MessageSid") or "")
+    error_code = str(form.get("ErrorCode") or "")
+    error_message = str(form.get("ErrorMessage") or "")
+    to_number = normalize_phone(str(form.get("To") or ""))
+    print(
+        "WHATSAPP_STATUS "
+        f"sid_tail={sid[-6:]} to=***{to_number[-4:] if to_number else ''} "
+        f"status={status} error_code={error_code or '-'} "
+        f"error={error_message[:160] if error_message else '-'}"
+    )
+    return Response(status_code=204)
 
 
 def validate_twilio_request(request: Request, form_data: dict[str, str]) -> bool:
