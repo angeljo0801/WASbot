@@ -480,6 +480,24 @@ class ApiService {
     }
   }
 
+  Future<Map<String, dynamic>?> comboStatus() async {
+    final url = await baseUrl;
+    if (url.isEmpty) return null;
+    try {
+      final r = await http
+          .get(
+            Uri.parse('$url/api/combo/status'),
+            headers: await _headers(),
+          )
+          .timeout(const Duration(seconds: 10));
+      if (r.statusCode != 200) return null;
+      final data = jsonDecode(r.body);
+      return data is Map ? Map<String, dynamic>.from(data) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<bool> health() async {
     final url = await baseUrl;
     if (url.isEmpty) return false;
