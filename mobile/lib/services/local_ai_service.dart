@@ -87,30 +87,82 @@ class LocalAiService {
     if (!Platform.isAndroid) {
       throw UnsupportedError('La IA local de WhatsBot está habilitada en Android.');
     }
-    if (path.trim().isEmpty) {
+    final cleanPath = path.trim();
+    if (cleanPath.isEmpty) {
       throw ArgumentError('Ruta de modelo vacía.');
     }
-    if (_loadedModelPath == path && _controller != null) return;
+    if (_loadedModelPath == cleanPath && _controller != null) return;
+
+    if (!cleanPath.startsWith('content://')) {
+      final file = File(cleanPath);
+      if (!await file.exists()) {
+        throw StateError(
+          'El archivo GGUF ya no existe en esa ubicación. Vuelve a seleccionarlo en Ajustes de IA.',
+        );
+      }
+      final size = await file.length();
+      if (size < 1024 * 1024) {
+        throw StateError(
+          'El archivo seleccionado no parece ser un modelo GGUF válido.',
+        );
+      }
+    }
 
     _loading = true;
+    LlamaController? firstController;
     try {
       await dispose();
-      final controller = LlamaController();
-      var gpuLayers = 0;
+
+      Object? firstError;
       try {
-        final gpu = await controller.detectGpu();
-        gpuLayers = gpu.recommendedGpuLayers;
-      } catch (_) {
-        gpuLayers = 0;
+        firstController = LlamaController();
+        var gpuLayers = 0;
+        try {
+          final gpu = await firstController.detectGpu();
+          gpuLayers = gpu.recommendedGpuLayers;
+        } catch (_) {
+          gpuLayers = 0;
+        }
+        await firstController.loadModel(
+          modelPath: cleanPath,
+          contextSize: 4096,
+          threads: 6,
+          gpuLayers: gpuLayers,
+        );
+        _controller = firstController;
+        _loadedModelPath = cleanPath;
+        return;
+      } catch (e) {
+        firstError = e;
+        try {
+          await firstController?.dispose();
+        } catch (_) {}
+        firstController = null;
       }
-      await controller.loadModel(
-        modelPath: path,
-        contextSize: 4096,
-        threads: 6,
-        gpuLayers: gpuLayers,
-      );
-      _controller = controller;
-      _loadedModelPath = path;
+
+      // Algunos teléfonos fallan al inicializar Vulkan/GPU aunque el GGUF sea
+      // válido. Reintentar en CPU y con un contexto menor evita ese fallo y
+      // usa menos RAM.
+      try {
+        final cpuController = LlamaController();
+        await cpuController.loadModel(
+          modelPath: cleanPath,
+          contextSize: 2048,
+          threads: 4,
+          gpuLayers: 0,
+        );
+        _controller = cpuController;
+        _loadedModelPath = cleanPath;
+        return;
+      } catch (_) {
+        throw StateError(
+          'No pude cargar el GGUF directamente en WhatsBot. '
+          'Puede ser incompatible, haberse movido o no caber en la RAM. '
+          'Usa Local AI Manager para reutilizar el modelo compartido o selecciona otro GGUF. '
+          'Primer intento: ' +
+              (firstError?.runtimeType.toString() ?? 'desconocido'),
+        );
+      }
     } finally {
       _loading = false;
     }
@@ -220,7 +272,7 @@ class LocalAiService {
       throw const FormatException('El modelo no devolvió JSON válido.');
     }
     const categories = {
-      'Inbox', 'Trabajo', 'Personal', 'Compras', 'Gastos',
+      'Inbox', 'Clientes', 'Trabajo', 'Personal', 'Compras', 'Gastos',
       'Ideas', 'Documentos', 'Recordatorios', 'Fotos'
     };
     final rawCategory = (data['category'] ?? 'Inbox').toString();
