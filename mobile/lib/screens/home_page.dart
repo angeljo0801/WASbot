@@ -7,6 +7,7 @@ import '../services/api_service.dart';
 import '../services/local_ai_service.dart';
 import '../services/paqueteria_purchase_sync_service.dart';
 import 'ai_settings_page.dart';
+import 'combo_page.dart';
 import 'new_note_page.dart';
 import 'note_detail_page.dart';
 import 'settings_page.dart';
@@ -171,6 +172,17 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title: const Text('WhatsBot'),
         actions: [
+          IconButton(
+            tooltip: 'Paquetería',
+            onPressed: () async {
+              await Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => ComboPage(api: api)),
+              );
+              if (mounted) refresh();
+            },
+            icon: const Icon(Icons.hub_outlined),
+          ),
           IconButton(
             tooltip: 'Inteligencia artificial',
             onPressed: () async {
