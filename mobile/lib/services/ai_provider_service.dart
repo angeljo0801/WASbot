@@ -346,7 +346,7 @@ class AiProviderService {
     const system =
         'Eres el organizador privado de WhatsBot. '
         'Devuelve SOLO JSON válido, sin markdown, con las claves title, content, category, tags. '
-        'category debe ser exactamente una de: Inbox, Trabajo, Personal, Compras, Gastos, Ideas, Documentos, Recordatorios, Fotos. '
+        'category debe ser exactamente una de: Inbox, Clientes, Trabajo, Personal, Compras, Gastos, Ideas, Documentos, Recordatorios, Fotos. Si la nota representa un contacto o datos de un cliente, usa Clientes. '
         'tags debe ser un array de 0 a 6 strings cortos. '
         'Conserva exactamente nombres, teléfonos, fechas, cantidades, precios y tracking. '
         'Corrige redacción y OCR solo cuando sea obvio. No inventes datos.';
