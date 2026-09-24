@@ -473,6 +473,13 @@ class SendMessage(BaseModel):
     body: str
 
 
+class ClientSyncCreate(BaseModel):
+    external_id: str
+    name: str
+    phone: str = ""
+    source: str = "paqueteria"
+
+
 class PurchasePhoto(BaseModel):
     name: str = "photo.jpg"
     data: str
@@ -630,6 +637,71 @@ def list_synced_clients() -> list[dict[str, Any]]:
             }
             for row in rows
         ]
+
+
+@app.post("/api/clients", dependencies=[Depends(require_api_key)])
+def upsert_synced_client(payload: ClientSyncCreate) -> dict[str, Any]:
+    external_id = payload.external_id.strip()
+    if not external_id:
+        raise HTTPException(status_code=400, detail="external_id is required")
+    name = payload.name.strip()
+    phone = normalize_phone(payload.phone)
+    source = payload.source.strip() or "paqueteria"
+    now = utc_now()
+
+    with closing(db()) as conn:
+        existing = None
+        if phone:
+            existing = conn.execute(
+                "SELECT * FROM client_sync WHERE phone = ? ORDER BY id LIMIT 1",
+                (phone,),
+            ).fetchone()
+        if existing is None:
+            existing = conn.execute(
+                "SELECT * FROM client_sync WHERE external_id = ?",
+                (external_id,),
+            ).fetchone()
+
+        if existing is not None:
+            canonical_external = existing["external_id"]
+            conn.execute(
+                """
+                UPDATE client_sync
+                SET name = ?, phone = ?, source = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    name or existing["name"],
+                    phone or existing["phone"],
+                    source,
+                    now,
+                    existing["id"],
+                ),
+            )
+        else:
+            canonical_external = external_id
+            conn.execute(
+                """
+                INSERT INTO client_sync(
+                    external_id, name, phone, source, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (canonical_external, name, phone, source, now, now),
+            )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM client_sync WHERE external_id = ?",
+            (canonical_external,),
+        ).fetchone()
+        return {
+            "id": row["id"],
+            "external_id": row["external_id"],
+            "name": row["name"],
+            "phone": row["phone"],
+            "source": row["source"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
 
 
 def purchase_row(row: sqlite3.Row) -> dict[str, Any]:
