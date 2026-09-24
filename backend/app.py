@@ -17,6 +17,8 @@ from twilio.request_validator import RequestValidator
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 
+from combo import router as combo_router, looks_like_purchase, pending_purchase, process_operator_message
+
 
 APP_API_KEY = os.getenv("APP_API_KEY", "dev-mobile-key").strip()
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
@@ -136,6 +138,9 @@ def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
+app.include_router(combo_router, dependencies=[Depends(require_api_key)])
+
+
 def get_config(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
     owns = conn is None
     conn = conn or db()
@@ -213,6 +218,13 @@ def allowed_sender(sender: str, config: dict[str, Any]) -> bool:
     allowed = [normalize_phone(x) for x in config.get("allowed_senders", [])]
     allowed = [x for x in allowed if x]
     return not allowed or normalize_phone(sender) in allowed
+
+
+
+def operator_sender(sender: str, config: dict[str, Any]) -> bool:
+    allowed = [normalize_phone(x) for x in config.get("allowed_senders", [])]
+    allowed = [x for x in allowed if x]
+    return bool(allowed) and normalize_phone(sender) in allowed
 
 
 def infer_message_type(content_type: str | None, num_media: int) -> str:
@@ -315,7 +327,23 @@ def download_twilio_media(url: str) -> bytes:
         ).decode("ascii")
         request.add_header("Authorization", f"Basic {token}")
     with urllib.request.urlopen(request, timeout=15) as response:
-        return response.read(2 * 1024 * 1024)
+        return response.read(12 * 1024 * 1024 + 1)
+
+
+def persist_purchase_media(url: str, content_type: str, stem: str) -> str:
+    if not url:
+        return ""
+    raw = download_twilio_media(url)
+    if len(raw) > 12 * 1024 * 1024:
+        return ""
+    c = (content_type or "").lower()
+    ext = ".png" if "png" in c else ".webp" if "webp" in c else ".jpg"
+    folder = DATA_DIR / "purchase_media"
+    folder.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", stem)[:80] or "whatsapp"
+    name = f"{safe}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}{ext}"
+    (folder / name).write_bytes(raw)
+    return name
 
 
 def normalize_yes_no(value: str) -> str:
@@ -775,8 +803,10 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
     if not allowed_sender(sender, config):
         return Response(content=str(MessagingResponse()), media_type="application/xml")
 
-    # If the previous WhatsApp message was a contact, a simple Sí/No confirms it.
-    pending_contacts = get_pending_contacts(sender)
+    operator = operator_sender(sender, config)
+
+    # Only an explicitly authorized operator can create or query business data.
+    pending_contacts = get_pending_contacts(sender) if operator else []
     answer = normalize_yes_no(body) if pending_contacts else ""
     if answer:
         response = MessagingResponse()
@@ -806,7 +836,7 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
     content_type = (data.get("MediaContentType0") or "").lower()
 
     # WhatsApp shared contacts arrive as vCard media. Parse them and ask first.
-    if num_media > 0 and media_url and (
+    if operator and num_media > 0 and media_url and (
         "vcard" in content_type
         or "x-vcard" in content_type
         or content_type in {"text/directory", "application/octet-stream"}
@@ -837,6 +867,35 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
                     f"Recibí {len(contacts)} contactos: {names}{extra}. "
                     "¿Quieres guardarlos como clientes en Paquetería? Responde Sí o No."
                 )
+            return Response(content=str(response), media_type="application/xml")
+
+    if operator:
+        purchase_photos: list[str] = []
+        if num_media > 0 and (pending_purchase(sender) is not None or looks_like_purchase(body)):
+            for i in range(num_media):
+                item_type = (data.get(f"MediaContentType{i}") or "").lower()
+                item_url = data.get(f"MediaUrl{i}") or ""
+                if item_url and item_type.startswith("image/"):
+                    try:
+                        saved = persist_purchase_media(
+                            item_url,
+                            item_type,
+                            f"{message_sid or 'purchase'}_{i}",
+                        )
+                        if saved:
+                            purchase_photos.append(saved)
+                    except Exception:
+                        pass
+
+        combo_reply = process_operator_message(
+            sender,
+            body,
+            purchase_photos,
+            message_sid,
+        )
+        if combo_reply:
+            response = MessagingResponse()
+            response.message(combo_reply)
             return Response(content=str(response), media_type="application/xml")
 
     media_type = infer_message_type(content_type, num_media)
