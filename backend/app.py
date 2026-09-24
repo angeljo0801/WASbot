@@ -198,6 +198,23 @@ def twilio_client() -> Client:
     )
 
 
+def send_whatsapp_direct(to_number: str, body: str) -> None:
+    config = get_config()
+    from_number = normalize_phone(config.get("bot_number") or TWILIO_WHATSAPP_FROM)
+    to_number = normalize_phone(to_number)
+    if not from_number or not to_number:
+        raise RuntimeError("Missing WhatsApp phone number")
+    msg = twilio_client().messages.create(
+        from_=f"whatsapp:{from_number}",
+        to=f"whatsapp:{to_number}",
+        body=body,
+    )
+    print(
+        "WHATSAPP_DIAG direct_send "
+        f"to=***{to_number[-4:]} status={getattr(msg, 'status', '')}"
+    )
+
+
 def validate_twilio_request(request: Request, form_data: dict[str, str]) -> bool:
     if not TWILIO_AUTH_TOKEN:
         return False
@@ -1014,9 +1031,20 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
         )
         if combo_reply:
             print(f"WHATSAPP_DIAG reply=combo sender={masked_sender}")
-            response = MessagingResponse()
-            response.message(combo_reply)
-            return Response(content=str(response), media_type="application/xml")
+            try:
+                send_whatsapp_direct(sender, combo_reply)
+                return Response(
+                    content=str(MessagingResponse()),
+                    media_type="application/xml",
+                )
+            except Exception as exc:
+                print(
+                    "WHATSAPP_DIAG direct_send_failed "
+                    f"sender={masked_sender} error={type(exc).__name__}"
+                )
+                response = MessagingResponse()
+                response.message(combo_reply)
+                return Response(content=str(response), media_type="application/xml")
 
     media_type = infer_message_type(content_type, num_media)
     persisted_media = media_url
