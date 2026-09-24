@@ -54,6 +54,21 @@ def init_combo_db() -> None:
                 source TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS pending_operator_actions (
+                sender TEXT PRIMARY KEY,
+                action_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS paqueteria_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                source TEXT NOT NULL DEFAULT 'whatsapp',
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            );
             """
         )
         conn.commit()
@@ -119,6 +134,9 @@ def combo_status() -> dict[str, Any]:
         pending = conn.execute(
             "SELECT COUNT(*) AS n FROM pending_purchase_requests"
         ).fetchone()["n"]
+        pending_actions = conn.execute(
+            "SELECT COUNT(*) AS n FROM paqueteria_actions WHERE status = 'pending'"
+        ).fetchone()["n"]
     return {
         "ok": True,
         "snapshot_updated_at": snap["updated_at"],
@@ -126,8 +144,120 @@ def combo_status() -> dict[str, Any]:
             k: len(v) for k, v in snap["payload"].items() if isinstance(v, list)
         },
         "pending_purchase_conversations": pending,
+        "pending_paqueteria_actions": pending_actions,
         "persistent_data_dir": str(DATA_DIR),
     }
+
+
+@router.get("/api/paqueteria/actions")
+def list_paqueteria_actions() -> list[dict[str, Any]]:
+    with closing(db()) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, action_type, payload_json, status, source, created_at, completed_at
+            FROM paqueteria_actions
+            WHERE status = 'pending'
+            ORDER BY id ASC
+            """
+        ).fetchall()
+    result = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except Exception:
+            payload = {}
+        result.append(
+            {
+                "id": row["id"],
+                "action_type": row["action_type"],
+                "payload": payload,
+                "status": row["status"],
+                "source": row["source"],
+                "created_at": row["created_at"],
+            }
+        )
+    return result
+
+
+@router.post("/api/paqueteria/actions/{action_id}/complete")
+def complete_paqueteria_action(action_id: int) -> dict[str, Any]:
+    with closing(db()) as conn:
+        cur = conn.execute(
+            """
+            UPDATE paqueteria_actions
+            SET status = 'completed', completed_at = ?
+            WHERE id = ? AND status = 'pending'
+            """,
+            (utc_now(), action_id),
+        )
+        conn.commit()
+    return {"ok": cur.rowcount > 0}
+
+
+def pending_operator_action(sender: str) -> dict[str, Any] | None:
+    with closing(db()) as conn:
+        row = conn.execute(
+            "SELECT action_json FROM pending_operator_actions WHERE sender = ?",
+            (normalize_phone(sender),),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        value = json.loads(row["action_json"])
+        return value if isinstance(value, dict) else None
+    except Exception:
+        return None
+
+
+def save_pending_operator_action(sender: str, action: dict[str, Any]) -> None:
+    now = utc_now()
+    with closing(db()) as conn:
+        conn.execute(
+            """
+            INSERT INTO pending_operator_actions(sender, action_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(sender) DO UPDATE SET
+                action_json = excluded.action_json,
+                updated_at = excluded.updated_at
+            """,
+            (normalize_phone(sender), json.dumps(action, ensure_ascii=False), now, now),
+        )
+        conn.commit()
+
+
+def clear_pending_operator_action(sender: str) -> None:
+    with closing(db()) as conn:
+        conn.execute(
+            "DELETE FROM pending_operator_actions WHERE sender = ?",
+            (normalize_phone(sender),),
+        )
+        conn.commit()
+
+
+def enqueue_paqueteria_action(action: dict[str, Any]) -> int:
+    now = utc_now()
+    action_type = str(action.get("action_type") or "").strip()
+    payload = action.get("payload")
+    if not action_type or not isinstance(payload, dict):
+        raise ValueError("Invalid action")
+    with closing(db()) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO paqueteria_actions(
+                action_type, payload_json, status, source, created_at
+            ) VALUES (?, ?, 'pending', 'whatsapp', ?)
+            """,
+            (action_type, json.dumps(payload, ensure_ascii=False), now),
+        )
+        conn.execute(
+            """
+            INSERT INTO sync_events(entity_type, entity_id, action, source, created_at)
+            VALUES ('paqueteria_action', ?, ?, 'whatsapp', ?)
+            """,
+            (str(cur.lastrowid), action_type, now),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
 
 
 def clean_text(value: str) -> str:
@@ -431,6 +561,70 @@ def process_operator_message(
     message_sid: str | None,
 ) -> str | None:
     sender = normalize_phone(sender)
+
+    pending_action = pending_operator_action(sender)
+    if pending_action is not None:
+        answer = yes_no(body)
+        if answer == "no":
+            clear_pending_operator_action(sender)
+            return "Acción cancelada."
+        if answer == "yes":
+            action_id = enqueue_paqueteria_action(pending_action)
+            clear_pending_operator_action(sender)
+            return f"Acción #{action_id} enviada a Paquetería. Se aplicará en la próxima sincronización."
+        return "Tengo una acción pendiente. Responde Sí para confirmarla o No para cancelarla."
+
+    clean = clean_text(body)
+    package_action = re.search(
+        r"(?:marca|cambia)\s+(?:el\s+)?(?:paquete\s+)?([a-z0-9-]{6,})\s+(?:como|a)\s+(.+)$",
+        clean,
+    )
+    if package_action:
+        tracking = package_action.group(1).upper()
+        requested = package_action.group(2).strip()
+        status_map = {
+            "recibido": "Recibido",
+            "verificado": "Verificado",
+            "listo para cuba": "Listo para Cuba",
+            "asignado a viaje": "Asignado a viaje",
+            "en transito a cuba": "En tránsito a Cuba",
+            "llego a cuba": "Llegó a Cuba",
+            "entregado": "Entregado",
+            "problema": "Problema",
+        }
+        status = status_map.get(requested)
+        if status:
+            action = {
+                "action_type": "package_status",
+                "payload": {"tracking": tracking, "status": status},
+            }
+            save_pending_operator_action(sender, action)
+            return f"Voy a cambiar {tracking} a “{status}”. ¿Confirmas? Responde Sí o No."
+
+    payment_action = re.search(
+        r"(?:registra|registrar|anota|añade|agrega)\s+(?:un\s+)?pago\s+(?:de\s+)?(?:usd\s*)?(\d+(?:[.,]\d{1,2})?)\s+(?:para|de)\s+(.+)$",
+        clean,
+    )
+    if payment_action:
+        amount = float(payment_action.group(1).replace(",", "."))
+        client_query = payment_action.group(2).strip()
+        client = find_client(snapshot()["payload"], client_query)
+        if client is None:
+            return "No encontré ese cliente en Paquetería."
+        action = {
+            "action_type": "payment",
+            "payload": {
+                "clientId": str(client.get("id") or ""),
+                "clientName": str(client.get("name") or client_query),
+                "amount": amount,
+            },
+        }
+        save_pending_operator_action(sender, action)
+        return (
+            f"Voy a registrar un pago de USD {amount:.2f} para "
+            f"{client.get('name')}. ¿Confirmas? Responde Sí o No."
+        )
+
     pending = pending_purchase(sender)
 
     if pending is not None:
@@ -466,6 +660,19 @@ def process_operator_message(
                 "Me falta: " + " y ".join(missing) + "."
             )
         return f"Actualicé la compra. {purchase_summary(pending)} ¿La guardo? Responde Sí o No."
+
+    if clean in {"ayuda", "help", "/ayuda", "/help"}:
+        return (
+            "Puedo trabajar con Paquetería desde aquí. Ejemplos:\n"
+            "• saldo de María\n"
+            "• tracking 1Z...\n"
+            "• paquetes de Juan\n"
+            "• compras de Ana\n"
+            "• listos para Cuba\n"
+            "• compra para María, Amazon, 82.50\n"
+            "• registra un pago de 50 para María\n"
+            "• marca 1Z... como Recibido"
+        )
 
     answer = query_business(body)
     if answer:
