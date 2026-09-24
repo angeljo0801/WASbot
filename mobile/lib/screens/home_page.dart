@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../models/note.dart';
 import '../services/api_service.dart';
+import '../services/background_service.dart';
 import '../services/ai_provider_service.dart';
 import '../services/local_ai_service.dart';
 import '../services/paqueteria_purchase_sync_service.dart';
@@ -26,7 +27,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final api = ApiService();
   final localAi = LocalAiService();
   late final AiProviderService ai;
@@ -52,10 +53,14 @@ class _HomePageState extends State<HomePage> {
   int knowledgeTotal = 0;
   String knowledgeLabel = '';
   String? error;
+  Timer? _backgroundTimer;
+  AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
+  bool _backgroundTickRunning = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     ai = AiProviderService(localAi: localAi);
     embeddings = EmbeddingService();
     knowledge = KnowledgePipeline(
@@ -63,11 +68,63 @@ class _HomePageState extends State<HomePage> {
       ai: ai,
       embeddings: embeddings,
     );
+    _backgroundTimer = Timer.periodic(
+      const Duration(minutes: 1),
+      (_) {
+        if (_lifecycleState != AppLifecycleState.resumed) {
+          unawaited(_backgroundTick());
+        }
+      },
+    );
     refresh();
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _lifecycleState = state;
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      unawaited(_backgroundTick());
+    }
+  }
+
+  Future<void> _backgroundTick() async {
+    if (_backgroundTickRunning) return;
+    final enabled = await WhatsBotBackgroundService.preferenceEnabled();
+    if (!enabled) return;
+
+    _backgroundTickRunning = true;
+    try {
+      if (!WhatsBotBackgroundService.isRunning) {
+        final started = await WhatsBotBackgroundService.restore();
+        if (!started) return;
+      }
+
+      final sync = PaqueteriaPurchaseSyncService(api);
+      await sync.flush();
+
+      final latest = await api.getNotes();
+      notes = latest;
+      await _runPostRefreshIntelligence();
+
+      if (mounted) {
+        final pending = await sync.pendingCount();
+        setState(() {
+          paqueteriaPending = pending;
+          notes = List<Note>.from(notes);
+        });
+      }
+    } catch (_) {
+      // El siguiente ciclo vuelve a intentar sin interrumpir la app.
+    } finally {
+      _backgroundTickRunning = false;
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _backgroundTimer?.cancel();
     search.dispose();
     unawaited(localAi.dispose());
     unawaited(embeddings.dispose());
