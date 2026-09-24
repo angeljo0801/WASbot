@@ -11,6 +11,9 @@ class Note {
   final String status;
   final String aiProvider;
   final String? mediaPath;
+  final String customerName;
+  final String customerPhone;
+  final List<String> photoPaths;
   final DateTime createdAt;
 
   Note({
@@ -27,10 +30,14 @@ class Note {
     required this.createdAt,
     this.remoteId,
     this.mediaPath,
+    this.customerName = '',
+    this.customerPhone = '',
+    this.photoPaths = const <String>[],
   });
 
   bool get isLocalRecord => id < 0;
   bool get pendingSync => status == 'pending_sync';
+  bool get isPurchase => category == 'Compras';
 
   factory Note.fromJson(Map<String, dynamic> json) => Note(
         id: (json['id'] as num).toInt(),
@@ -45,6 +52,12 @@ class Note {
         status: (json['status'] ?? 'ready').toString(),
         aiProvider: (json['ai_provider'] ?? json['ai_source'] ?? 'rules').toString(),
         mediaPath: json['media_path']?.toString(),
+        customerName: (json['customer_name'] ?? '').toString(),
+        customerPhone: (json['customer_phone'] ?? '').toString(),
+        photoPaths: ((json['photo_paths'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .where((e) => e.isNotEmpty)
+            .toList(),
         createdAt: DateTime.tryParse((json['created_at'] ?? '').toString()) ?? DateTime.now(),
       );
 
@@ -60,6 +73,9 @@ class Note {
     String? status,
     String? aiProvider,
     String? mediaPath,
+    String? customerName,
+    String? customerPhone,
+    List<String>? photoPaths,
     DateTime? createdAt,
   }) =>
       Note(
@@ -75,6 +91,9 @@ class Note {
         status: status ?? this.status,
         aiProvider: aiProvider ?? this.aiProvider,
         mediaPath: mediaPath ?? this.mediaPath,
+        customerName: customerName ?? this.customerName,
+        customerPhone: customerPhone ?? this.customerPhone,
+        photoPaths: photoPaths ?? this.photoPaths,
         createdAt: createdAt ?? this.createdAt,
       );
 
@@ -91,6 +110,9 @@ class Note {
         'status': status,
         'ai_provider': aiProvider,
         'media_path': mediaPath,
+        'customer_name': customerName,
+        'customer_phone': customerPhone,
+        'photo_paths': photoPaths,
         'created_at': createdAt.toIso8601String(),
       };
 }
