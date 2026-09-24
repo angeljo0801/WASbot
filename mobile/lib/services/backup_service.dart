@@ -62,6 +62,7 @@ class WhatsBotBackupService {
     final p = file.path.toLowerCase().replaceAll('\\', '/');
     return p.contains('/models/') ||
         p.contains('/model_cache/') ||
+        p.contains('/embedding_models/') ||
         p.endsWith('.gguf') ||
         p.endsWith('.safetensors');
   }
@@ -182,7 +183,9 @@ class WhatsBotBackupService {
     if (!await root.exists()) return;
     for (final entity in await root.list(followLinks: false).toList()) {
       final lower = entity.path.toLowerCase().replaceAll('\\', '/');
-      if (lower.endsWith('/models') || lower.endsWith('/model_cache')) {
+      if (lower.endsWith('/models') ||
+          lower.endsWith('/model_cache') ||
+          lower.endsWith('/embedding_models')) {
         continue;
       }
       if (entity is File) {
