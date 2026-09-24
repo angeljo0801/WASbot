@@ -322,7 +322,7 @@ class _HomePageState extends State<HomePage> {
                   ),
                   onTap: () => Navigator.push(
                     context,
-                    MaterialPageRoute(builder: (_) => NoteDetailPage(note: n)),
+                    MaterialPageRoute(builder: (_) => NoteDetailPage(note: n, api: api)),
                   ),
                 ),
               ),
