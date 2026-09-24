@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 
 import '../models/entity_record.dart';
@@ -6,6 +8,7 @@ import '../services/ai_provider_service.dart';
 import '../services/api_service.dart';
 import '../services/embedding_service.dart';
 import '../services/knowledge_store.dart';
+import 'note_detail_page.dart';
 
 class KnowledgeChatPage extends StatefulWidget {
   final ApiService api;
@@ -122,6 +125,32 @@ class _KnowledgeChatPageState extends State<KnowledgeChatPage> {
     return best;
   }
 
+  List<String> _sourceKeys(Map<String, dynamic> message) {
+    final raw = message['sources_json'];
+    if (raw is List) {
+      return raw.map((e) => e.toString()).where((e) => e.isNotEmpty).toList();
+    }
+    if (raw is String && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is List) {
+          return decoded
+              .map((e) => e.toString())
+              .where((e) => e.isNotEmpty)
+              .toList();
+        }
+      } catch (_) {}
+    }
+    return const <String>[];
+  }
+
+  Note? _noteForKey(String key) {
+    for (final note in notes) {
+      if (KnowledgeStore.noteKey(note) == key) return note;
+    }
+    return null;
+  }
+
   String _excerpt(Note note) {
     final text = (note.content.trim().isNotEmpty
             ? note.content
@@ -209,10 +238,20 @@ class _KnowledgeChatPageState extends State<KnowledgeChatPage> {
         maxTokens: 1200,
         temperature: 0.2,
       );
-      await store.addChatMessage('assistant', answer);
+      final sourceKeys =
+          selected.map(KnowledgeStore.noteKey).toList(growable: false);
+      await store.addChatMessage(
+        'assistant',
+        answer,
+        sourceKeys: sourceKeys,
+      );
       if (!mounted) return;
       setState(() {
-        messages.add({'role': 'assistant', 'text': answer});
+        messages.add({
+          'role': 'assistant',
+          'text': answer,
+          'sources_json': jsonEncode(sourceKeys),
+        });
       });
     } catch (e) {
       final message = 'No pude responder: $e';
@@ -291,14 +330,66 @@ class _KnowledgeChatPageState extends State<KnowledgeChatPage> {
                         }
                         final m = messages[index];
                         final user = m['role'] == 'user';
+                        final sourceNotes = _sourceKeys(m)
+                            .map(_noteForKey)
+                            .whereType<Note>()
+                            .toList();
                         return Align(
                           alignment:
                               user ? Alignment.centerRight : Alignment.centerLeft,
-                          child: Card(
-                            child: Padding(
-                              padding: const EdgeInsets.all(12),
-                              child: SelectableText(
-                                (m['text'] ?? '').toString(),
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 520),
+                            child: Card(
+                              child: Padding(
+                                padding: const EdgeInsets.all(12),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    SelectableText(
+                                      (m['text'] ?? '').toString(),
+                                    ),
+                                    if (!user && sourceNotes.isNotEmpty) ...[
+                                      const SizedBox(height: 10),
+                                      const Text(
+                                        'Fuentes',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Wrap(
+                                        spacing: 6,
+                                        runSpacing: 6,
+                                        children: [
+                                          for (var i = 0;
+                                              i < sourceNotes.length;
+                                              i++)
+                                            ActionChip(
+                                              avatar: const Icon(
+                                                Icons.notes_outlined,
+                                                size: 16,
+                                              ),
+                                              label: Text(
+                                                '[N${i + 1}] ${sourceNotes[i].title}',
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                              onPressed: () => Navigator.push(
+                                                context,
+                                                MaterialPageRoute(
+                                                  builder: (_) => NoteDetailPage(
+                                                    note: sourceNotes[i],
+                                                    api: widget.api,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                    ],
+                                  ],
+                                ),
                               ),
                             ),
                           ),
