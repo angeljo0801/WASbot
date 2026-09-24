@@ -30,7 +30,14 @@ class NoteDetailPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final localImage = note.mediaPath != null && File(note.mediaPath!).existsSync();
+    final photos = note.photoPaths
+        .where((path) => File(path).existsSync())
+        .toList();
+    if (photos.isEmpty &&
+        note.mediaPath != null &&
+        File(note.mediaPath!).existsSync()) {
+      photos.add(note.mediaPath!);
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -58,16 +65,66 @@ class NoteDetailPage extends StatelessWidget {
                 ...note.tags.map((t) => Chip(label: Text('#$t'))),
               ],
             ),
-            if (localImage) ...[
-              const SizedBox(height: 18),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: Image.file(
-                  File(note.mediaPath!),
-                  width: double.infinity,
-                  fit: BoxFit.contain,
+            if (note.isPurchase &&
+                (note.customerName.isNotEmpty || note.customerPhone.isNotEmpty)) ...[
+              const SizedBox(height: 16),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Cliente',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 8),
+                      if (note.customerName.isNotEmpty)
+                        Row(
+                          children: [
+                            const Icon(Icons.person_outline, size: 20),
+                            const SizedBox(width: 8),
+                            Expanded(child: SelectableText(note.customerName)),
+                          ],
+                        ),
+                      if (note.customerPhone.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            const Icon(Icons.phone_outlined, size: 20),
+                            const SizedBox(width: 8),
+                            Expanded(child: SelectableText(note.customerPhone)),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
               ),
+            ],
+            if (photos.isNotEmpty) ...[
+              const SizedBox(height: 18),
+              SizedBox(
+                height: 260,
+                child: PageView.builder(
+                  itemCount: photos.length,
+                  itemBuilder: (_, index) => Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(16),
+                      child: Image.file(
+                        File(photos[index]),
+                        width: double.infinity,
+                        fit: BoxFit.contain,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              if (photos.length > 1) ...[
+                const SizedBox(height: 6),
+                Center(child: Text('${photos.length} fotos')),
+              ],
             ],
             const SizedBox(height: 18),
             SelectableText(
@@ -81,7 +138,8 @@ class NoteDetailPage extends StatelessWidget {
               const SizedBox(height: 8),
               SelectableText(note.originalText),
             ],
-            if (note.mediaPath != null && !localImage) ...[
+            if (note.mediaPath != null &&
+                photos.isEmpty) ...[
               const SizedBox(height: 28),
               Text(
                 'Archivo original conservado',
