@@ -149,6 +149,15 @@ class AiProviderService {
     return 'Reglas';
   }
 
+  Future<void> cancelCurrent() async {
+    try {
+      await localAi.stop();
+    } catch (_) {}
+    try {
+      await _managerChannel.invokeMethod<void>('stop');
+    } catch (_) {}
+  }
+
   Future<void> test(AiProviderSettings s) async {
     if (s.provider == AiProvider.rules) return;
     if (s.provider == AiProvider.device) {
