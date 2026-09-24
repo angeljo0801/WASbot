@@ -396,6 +396,73 @@ class ApiService {
     );
   }
 
+  Future<Note> updateNoteManual(
+    Note note, {
+    String? title,
+    String? content,
+    String? category,
+    List<String>? tags,
+  }) async {
+    final nextTitle = title ?? note.title;
+    final nextContent = content ?? note.content;
+    final nextCategory = category ?? note.category;
+    final nextTags = tags ?? note.tags;
+
+    if (note.id < 0) {
+      final locals = await _loadLocalNotes();
+      final index = locals.indexWhere((n) => n.id == note.id);
+      if (index < 0) throw Exception('Nota local no encontrada');
+      locals[index] = locals[index].copyWith(
+        title: nextTitle,
+        content: nextContent,
+        category: nextCategory,
+        tags: nextTags,
+      );
+      await _saveLocalNotes(locals);
+      if (locals[index].remoteId != null) {
+        final url = await baseUrl;
+        if (url.isNotEmpty) {
+          try {
+            await http
+                .patch(
+                  Uri.parse('$url/api/notes/${locals[index].remoteId}'),
+                  headers: await _headers(),
+                  body: jsonEncode({
+                    'title': nextTitle,
+                    'content': nextContent,
+                    'category': nextCategory,
+                    'tags': nextTags,
+                  }),
+                )
+                .timeout(const Duration(seconds: 20));
+          } catch (_) {}
+        }
+      }
+      return locals[index];
+    }
+
+    final url = await baseUrl;
+    if (url.isEmpty) throw Exception('Servidor no configurado');
+    final response = await http
+        .patch(
+          Uri.parse('$url/api/notes/${note.id}'),
+          headers: await _headers(),
+          body: jsonEncode({
+            'title': nextTitle,
+            'content': nextContent,
+            'category': nextCategory,
+            'tags': nextTags,
+          }),
+        )
+        .timeout(const Duration(seconds: 20));
+    if (response.statusCode != 200) {
+      throw Exception('No se pudo actualizar (${response.statusCode})');
+    }
+    return Note.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
   Future<Note> updateNoteFromAi({
     required int id,
     required String title,
