@@ -1,5 +1,5 @@
 name: whatsbot
-version: 0.9.0+13
+version: 0.9.1+14
 publish_to: 'none'
 description: Inbox personal de notas recibidas desde WhatsApp con IA local opcional.
 environment:
@@ -25,6 +25,7 @@ dependencies:
   google_mlkit_translation: ^0.15.1
   pdf: ^3.13.0
   flutter_file_dialog: ^3.3.2
+  flutter_background: ^1.3.1
 
 dev_dependencies:
   flutter_test:

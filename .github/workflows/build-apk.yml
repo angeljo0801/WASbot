@@ -133,6 +133,20 @@ jobs:
                   root + '\n    <uses-permission android:name="android.permission.INTERNET" />',
                   1,
               )
+          background_permissions = [
+              'android.permission.FOREGROUND_SERVICE',
+              'android.permission.FOREGROUND_SERVICE_SPECIAL_USE',
+              'android.permission.WAKE_LOCK',
+              'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+              'android.permission.POST_NOTIFICATIONS',
+          ]
+          for permission in background_permissions:
+              if permission not in x:
+                  x = x.replace(
+                      root,
+                      root + f'\n    <uses-permission android:name="{permission}" />',
+                      1,
+                  )
           if 'android.permission.WRITE_EXTERNAL_STORAGE' not in x:
               x = x.replace(
                   root,
@@ -151,6 +165,17 @@ jobs:
                   root + '\n    <queries>\n        <package android:name="com.angelapps.local_ai_manager" />\n    </queries>',
                   1,
               )
+          if 'android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE' not in x:
+              service = '''        <service
+                  android:name="de.julianassmann.flutter_background.IsolateHolderService"
+                  android:exported="false"
+                  android:foregroundServiceType="specialUse">
+                  <property
+                      android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                      android:value="WhatsBot background synchronization and user-requested message processing" />
+              </service>
+          '''
+              x = x.replace('    </application>', service + '    </application>', 1)
           manifest.write_text(x)
           PY
 
@@ -231,7 +256,7 @@ jobs:
       - name: Build stable release APK
         working-directory: mobile
         run: |
-          flutter build apk --release --target-platform android-arm64 --build-name 0.9.0 --build-number "$GITHUB_RUN_NUMBER"
+          flutter build apk --release --target-platform android-arm64 --build-name 0.9.1 --build-number "$GITHUB_RUN_NUMBER"
 
       - name: Verify APK signature
         working-directory: mobile
@@ -242,7 +267,7 @@ jobs:
           "$APKSIGNER" verify --verbose build/app/outputs/flutter-apk/app-release.apk
           {
             echo "applicationId=com.whatsbot.whatsbot"
-            echo "versionName=0.9.0"
+            echo "versionName=0.9.1"
             echo "buildNumber=$GITHUB_RUN_NUMBER"
             echo "signing=persistent"
             echo "backups=Downloads/WhatsBot"
@@ -251,7 +276,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: WhatsBot-v0.9.0-Knowledge-Inbox-APK
+          name: WhatsBot-v0.9.1-Background-APK
           path: |
             mobile/build/app/outputs/flutter-apk/app-release.apk
             mobile/build/app/outputs/flutter-apk/BUILD_IDENTITY.txt
