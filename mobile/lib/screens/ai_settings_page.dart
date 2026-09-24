@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
+import '../services/ai_provider_service.dart';
 import '../services/api_service.dart';
 import '../services/local_ai_service.dart';
 
@@ -23,55 +24,101 @@ class AiSettingsPage extends StatefulWidget {
 }
 
 class _AiSettingsPageState extends State<AiSettingsPage> {
-  String aiMode = AiMode.server;
+  late final AiProviderService ai;
+
+  String provider = AiProvider.openai;
   String modelPath = '';
   bool autoProcess = true;
   bool loading = true;
   bool saving = false;
-  bool modelLoading = false;
+  bool testing = false;
   bool processing = false;
-  String? modelStatus;
+  String? status;
+
+  final openAiUrl = TextEditingController();
+  final openAiModel = TextEditingController();
+  final openAiKey = TextEditingController();
+  final geminiModel = TextEditingController();
+  final geminiKey = TextEditingController();
+  final localUrl = TextEditingController();
+  final localModel = TextEditingController();
+  final localKey = TextEditingController();
 
   @override
   void initState() {
     super.initState();
+    ai = AiProviderService(localAi: widget.localAi);
     load();
   }
 
+  @override
+  void dispose() {
+    openAiUrl.dispose();
+    openAiModel.dispose();
+    openAiKey.dispose();
+    geminiModel.dispose();
+    geminiKey.dispose();
+    localUrl.dispose();
+    localModel.dispose();
+    localKey.dispose();
+    super.dispose();
+  }
+
   Future<void> load() async {
-    final ai = await widget.localAi.settings();
-    var mode = ai.mode;
-    try {
-      mode = await widget.api.getProcessingMode();
-    } catch (_) {}
+    final s = await ai.settings();
     if (!mounted) return;
     setState(() {
-      aiMode = mode;
-      modelPath = ai.modelPath;
-      autoProcess = ai.autoProcess;
+      provider = s.provider;
+      modelPath = s.deviceModelPath;
+      autoProcess = s.autoProcess;
+      openAiUrl.text = s.openAiBaseUrl;
+      openAiModel.text = s.openAiModel;
+      openAiKey.text = s.openAiKey;
+      geminiModel.text = s.geminiModel;
+      geminiKey.text = s.geminiKey;
+      localUrl.text = s.localBaseUrl;
+      localModel.text = s.localModel;
+      localKey.text = s.localKey;
       loading = false;
     });
   }
 
+  AiProviderSettings currentSettings() => AiProviderSettings(
+        provider: provider,
+        autoProcess: autoProcess,
+        deviceModelPath: modelPath,
+        openAiBaseUrl: openAiUrl.text.trim(),
+        openAiModel: openAiModel.text.trim(),
+        openAiKey: openAiKey.text.trim(),
+        geminiModel: geminiModel.text.trim(),
+        geminiKey: geminiKey.text.trim(),
+        localBaseUrl: localUrl.text.trim(),
+        localModel: localModel.text.trim(),
+        localKey: localKey.text.trim(),
+      );
+
+  String backendMode() {
+    if (provider == AiProvider.device) return AiMode.local;
+    if (provider == AiProvider.rules) return AiMode.rules;
+    return AiMode.server;
+  }
+
   Future<void> save() async {
     setState(() => saving = true);
-    await widget.localAi.saveSettings(
-      mode: aiMode,
-      modelPath: modelPath,
-      autoProcess: autoProcess,
-    );
-    final synced = await widget.api.setProcessingMode(aiMode);
-    if (!mounted) return;
-    setState(() => saving = false);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          synced
-              ? 'Ajustes de IA guardados y sincronizados.'
-              : 'Ajustes de IA guardados en el teléfono. Se sincronizarán cuando el servidor esté disponible.',
-        ),
-      ),
-    );
+    try {
+      await ai.save(currentSettings());
+      final synced = await widget.api.setProcessingMode(backendMode());
+      if (!mounted) return;
+      setState(() {
+        status = synced
+            ? 'Ajustes de IA guardados y sincronizados.'
+            : 'Ajustes guardados en el teléfono. El servidor se sincronizará cuando esté disponible.';
+      });
+    } catch (e) {
+      if (mounted) setState(() => status = 'No se pudo guardar: ' + e.toString());
+    } finally {
+      if (mounted) setState(() => saving = false);
+    }
   }
 
   Future<void> chooseModel() async {
@@ -85,54 +132,40 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
       if (path == null || path.isEmpty) {
         throw Exception('Android no devolvió una ruta local para ese archivo.');
       }
-      setState(() {
-        modelPath = path;
-        modelStatus = 'Modelo seleccionado.';
-      });
-      await widget.localAi.saveSettings(
-        mode: aiMode,
-        modelPath: modelPath,
-        autoProcess: autoProcess,
-      );
+      if (mounted) {
+        setState(() {
+          modelPath = path;
+          status = 'Modelo GGUF seleccionado.';
+        });
+      }
     } catch (e) {
-      if (mounted) setState(() => modelStatus = 'No se pudo seleccionar: $e');
+      if (mounted) setState(() => status = 'No se pudo seleccionar: ' + e.toString());
     }
   }
 
-  Future<void> testModel() async {
-    if (modelPath.isEmpty) {
-      setState(() => modelStatus = 'Selecciona un archivo .gguf primero.');
-      return;
-    }
+  Future<void> testProvider() async {
     setState(() {
-      modelLoading = true;
-      modelStatus = 'Cargando modelo…';
+      testing = true;
+      status = 'Probando ' + ai.label(provider) + '…';
     });
     try {
-      await widget.localAi.saveSettings(
-        mode: AiMode.local,
-        modelPath: modelPath,
-        autoProcess: autoProcess,
-      );
-      await widget.localAi.loadModel(modelPath);
-      if (mounted) setState(() => modelStatus = 'Modelo local cargado correctamente.');
+      final s = currentSettings();
+      await ai.save(s);
+      await ai.test(s);
+      if (mounted) {
+        setState(() => status = ai.label(provider) + ' respondió correctamente.');
+      }
     } catch (e) {
-      if (mounted) setState(() => modelStatus = 'Error al cargar: $e');
+      if (mounted) setState(() => status = 'Error: ' + e.toString());
     } finally {
-      if (mounted) setState(() => modelLoading = false);
+      if (mounted) setState(() => testing = false);
     }
   }
 
   Future<void> processNow() async {
-    if (aiMode != AiMode.local) {
+    if (provider == AiProvider.rules) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Selecciona IA local para procesar las notas en el teléfono.')),
-      );
-      return;
-    }
-    if (modelPath.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Selecciona primero un modelo GGUF.')),
+        const SnackBar(content: Text('Reglas básicas no usan un modelo de IA.')),
       );
       return;
     }
@@ -143,12 +176,42 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
       await widget.onProcessNow();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Procesamiento local iniciado.')),
+          const SnackBar(content: Text('Procesamiento con IA iniciado.')),
         );
       }
     } finally {
       if (mounted) setState(() => processing = false);
     }
+  }
+
+  Widget choice(String value, IconData icon, String title, String subtitle) {
+    return Card(
+      child: RadioListTile<String>(
+        value: value,
+        groupValue: provider,
+        onChanged: (v) => setState(() {
+          provider = v ?? provider;
+          status = null;
+        }),
+        secondary: Icon(icon),
+        title: Text(title),
+        subtitle: Text(subtitle),
+      ),
+    );
+  }
+
+  Widget secretField(TextEditingController controller, String label) {
+    return TextField(
+      controller: controller,
+      obscureText: true,
+      enableSuggestions: false,
+      autocorrect: false,
+      decoration: InputDecoration(
+        labelText: label,
+        prefixIcon: const Icon(Icons.key_outlined),
+        border: const OutlineInputBorder(),
+      ),
+    );
   }
 
   String modelName() {
@@ -158,108 +221,195 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('Inteligencia artificial')),
+        appBar: AppBar(title: const Text('Ajustes de IA')),
         body: SafeArea(
           child: loading
               ? const Center(child: CircularProgressIndicator())
               : ListView(
-                  padding: const EdgeInsets.fromLTRB(20, 16, 20, 48),
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 48),
                   children: [
-                    Text('Modelo para organizar notas', style: Theme.of(context).textTheme.titleLarge),
+                    const Text(
+                      'Elige qué cerebro usará WhatsBot',
+                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                    ),
                     const SizedBox(height: 8),
                     const Text(
-                      'Elige dónde quieres que se interpreten y organicen los mensajes recibidos por WhatsApp.',
+                      'Ahora puedes escoger el proveedor igual que en Memora. '
+                      'Las claves de IA se guardan cifradas en el teléfono y no se envían al backend de WhatsBot.',
                     ),
-                    const SizedBox(height: 18),
-                    DropdownButtonFormField<String>(
-                      initialValue: aiMode,
-                      decoration: const InputDecoration(
-                        labelText: 'Modo de IA',
-                        border: OutlineInputBorder(),
+                    const SizedBox(height: 14),
+                    choice(
+                      AiProvider.openai,
+                      Icons.public,
+                      'OpenAI / compatible',
+                      'Usa OpenAI o cualquier API compatible con /chat/completions.',
+                    ),
+                    choice(
+                      AiProvider.gemini,
+                      Icons.cloud_outlined,
+                      'Gemini online',
+                      'Usa una API key de Google AI Studio.',
+                    ),
+                    choice(
+                      AiProvider.localServer,
+                      Icons.dns_outlined,
+                      'LLM local / servidor',
+                      'Ollama, LM Studio u otro servidor OpenAI-compatible.',
+                    ),
+                    choice(
+                      AiProvider.device,
+                      Icons.memory,
+                      'GGUF en este teléfono',
+                      'Usa directamente un modelo GGUF con llama.cpp.',
+                    ),
+                    choice(
+                      AiProvider.rules,
+                      Icons.rule_outlined,
+                      'Reglas básicas',
+                      'No usa un LLM. Es la opción más simple.',
+                    ),
+                    const SizedBox(height: 16),
+                    if (provider == AiProvider.openai) ...[
+                      TextField(
+                        controller: openAiUrl,
+                        keyboardType: TextInputType.url,
+                        decoration: const InputDecoration(
+                          labelText: 'URL base',
+                          hintText: 'https://api.openai.com/v1',
+                          border: OutlineInputBorder(),
+                        ),
                       ),
-                      items: const [
-                        DropdownMenuItem(
-                          value: AiMode.local,
-                          child: Text('Local en este teléfono (GGUF / LLaMA)'),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: openAiModel,
+                        decoration: const InputDecoration(
+                          labelText: 'Modelo',
+                          hintText: 'gpt-5.6-luna',
+                          border: OutlineInputBorder(),
                         ),
-                        DropdownMenuItem(
-                          value: AiMode.server,
-                          child: Text('Servidor / OpenAI-compatible / Ollama'),
+                      ),
+                      const SizedBox(height: 12),
+                      secretField(openAiKey, 'API key de OpenAI'),
+                    ],
+                    if (provider == AiProvider.gemini) ...[
+                      TextField(
+                        controller: geminiModel,
+                        decoration: const InputDecoration(
+                          labelText: 'Modelo de Gemini',
+                          hintText: 'gemini-2.5-flash',
+                          border: OutlineInputBorder(),
                         ),
-                        DropdownMenuItem(
-                          value: AiMode.rules,
-                          child: Text('Sin LLM — reglas básicas'),
+                      ),
+                      const SizedBox(height: 12),
+                      secretField(geminiKey, 'API key de Gemini'),
+                    ],
+                    if (provider == AiProvider.localServer) ...[
+                      TextField(
+                        controller: localUrl,
+                        keyboardType: TextInputType.url,
+                        decoration: const InputDecoration(
+                          labelText: 'URL del servidor',
+                          hintText: 'http://192.168.1.20:11434/v1',
+                          border: OutlineInputBorder(),
                         ),
-                      ],
-                      onChanged: (v) => setState(() => aiMode = v ?? aiMode),
-                    ),
-                    if (aiMode == AiMode.local) ...[
-                      const SizedBox(height: 18),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: localModel,
+                        decoration: const InputDecoration(
+                          labelText: 'Nombre del modelo',
+                          hintText: 'llama3.2:3b',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      secretField(localKey, 'Clave opcional'),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Si el servidor está en otro equipo, usa su IP local. '
+                        '127.0.0.1 solo funciona si el servidor corre en el propio teléfono.',
+                      ),
+                    ],
+                    if (provider == AiProvider.device) ...[
                       Card(
                         child: Padding(
                           padding: const EdgeInsets.all(16),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text('Modelo local', style: Theme.of(context).textTheme.titleMedium),
+                              Text(
+                                'Modelo GGUF',
+                                style: Theme.of(context).textTheme.titleMedium,
+                              ),
                               const SizedBox(height: 8),
-                              Text(modelName(), maxLines: 2, overflow: TextOverflow.ellipsis),
-                              const SizedBox(height: 6),
-                              const Text(
-                                'Puedes elegir cualquier modelo compatible con llama.cpp en formato GGUF. El archivo permanece en tu teléfono.',
+                              Text(
+                                modelName(),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
                               ),
-                              const SizedBox(height: 14),
-                              Wrap(
-                                spacing: 10,
-                                runSpacing: 10,
-                                children: [
-                                  OutlinedButton.icon(
-                                    onPressed: modelLoading ? null : chooseModel,
-                                    icon: const Icon(Icons.folder_open),
-                                    label: const Text('Elegir GGUF'),
-                                  ),
-                                  FilledButton.icon(
-                                    onPressed: modelLoading ? null : testModel,
-                                    icon: modelLoading
-                                        ? const SizedBox.square(
-                                            dimension: 18,
-                                            child: CircularProgressIndicator(strokeWidth: 2),
-                                          )
-                                        : const Icon(Icons.memory),
-                                    label: Text(modelLoading ? 'Cargando…' : 'Probar modelo'),
-                                  ),
-                                ],
+                              const SizedBox(height: 12),
+                              OutlinedButton.icon(
+                                onPressed: testing ? null : chooseModel,
+                                icon: const Icon(Icons.folder_open),
+                                label: const Text('Elegir GGUF'),
                               ),
-                              if (modelStatus != null) ...[
-                                const SizedBox(height: 12),
-                                Text(modelStatus!),
-                              ],
                             ],
                           ),
                         ),
                       ),
+                    ],
+                    if (provider != AiProvider.rules) ...[
+                      const SizedBox(height: 12),
                       SwitchListTile(
                         contentPadding: EdgeInsets.zero,
                         title: const Text('Organizar automáticamente'),
                         subtitle: const Text(
-                          'Al abrir o actualizar WhatsBot, procesa las notas nuevas con el modelo local.',
+                          'Procesa las notas nuevas de WhatsApp con el proveedor seleccionado.',
                         ),
                         value: autoProcess,
                         onChanged: (v) => setState(() => autoProcess = v),
                       ),
                       const SizedBox(height: 8),
                       OutlinedButton.icon(
-                        onPressed: processing || modelLoading ? null : processNow,
+                        onPressed: testing ? null : testProvider,
+                        icon: testing
+                            ? const SizedBox.square(
+                                dimension: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.science_outlined),
+                        label: Text(
+                          testing
+                              ? 'Probando…'
+                              : 'Probar ' + ai.label(provider),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: processing || testing ? null : processNow,
                         icon: processing
                             ? const SizedBox.square(
                                 dimension: 18,
                                 child: CircularProgressIndicator(strokeWidth: 2),
                               )
                             : const Icon(Icons.auto_awesome),
-                        label: Text(processing ? 'Procesando…' : 'Procesar pendientes ahora'),
+                        label: Text(
+                          processing
+                              ? 'Procesando…'
+                              : 'Procesar pendientes ahora',
+                        ),
                       ),
                     ],
-                    const SizedBox(height: 28),
+                    if (status != null) ...[
+                      const SizedBox(height: 12),
+                      Card(
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Text(status!),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 20),
                     FilledButton.icon(
                       onPressed: saving ? null : save,
                       icon: saving
@@ -268,7 +418,9 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
                           : const Icon(Icons.save_outlined),
-                      label: Text(saving ? 'Guardando…' : 'Guardar IA'),
+                      label: Text(
+                        saving ? 'Guardando…' : 'Guardar y usar esta opción',
+                      ),
                     ),
                   ],
                 ),
