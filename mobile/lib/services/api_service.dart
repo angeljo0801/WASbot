@@ -46,6 +46,29 @@ class ApiService {
     return digits.isEmpty ? '' : '+$digits';
   }
 
+  Future<List<Map<String, dynamic>>> getClients() async {
+    final url = await baseUrl;
+    if (url.isEmpty) return const <Map<String, dynamic>>[];
+    try {
+      final r = await http
+          .get(
+            Uri.parse('$url/api/clients'),
+            headers: await _headers(),
+          )
+          .timeout(const Duration(seconds: 12));
+      if (r.statusCode != 200) return const <Map<String, dynamic>>[];
+      final decoded = jsonDecode(r.body);
+      if (decoded is! List) return const <Map<String, dynamic>>[];
+      return decoded
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .where((e) => (e['name'] ?? '').toString().trim().isNotEmpty)
+          .toList();
+    } catch (_) {
+      return const <Map<String, dynamic>>[];
+    }
+  }
+
   Future<List<Note>> _loadLocalNotes() async {
     final p = await SharedPreferences.getInstance();
     final raw = p.getString(_localNotesKey);
