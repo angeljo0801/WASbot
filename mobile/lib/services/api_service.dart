@@ -498,6 +498,24 @@ class ApiService {
     }
   }
 
+  Future<Map<String, dynamic>?> paqueteriaSnapshot() async {
+    final url = await baseUrl;
+    if (url.isEmpty) return null;
+    try {
+      final r = await http
+          .get(
+            Uri.parse('$url/api/paqueteria/snapshot'),
+            headers: await _headers(),
+          )
+          .timeout(const Duration(seconds: 15));
+      if (r.statusCode != 200) return null;
+      final data = jsonDecode(r.body);
+      return data is Map ? Map<String, dynamic>.from(data) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<bool> health() async {
     final url = await baseUrl;
     if (url.isEmpty) return false;
