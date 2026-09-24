@@ -194,6 +194,7 @@ class _HomePageState extends State<HomePage> {
         'openai' => 'OpenAI',
         'gemini' => 'Gemini',
         'local_server' => 'IA local',
+        'manager' => 'Local AI Manager',
         'local' => 'GGUF local',
         'server' => 'IA servidor',
         _ => 'Reglas',
