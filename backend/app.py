@@ -908,10 +908,21 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
     message_sid = data.get("MessageSid", "").strip() or None
 
     config = get_config()
-    if not allowed_sender(sender, config):
-        return Response(content=str(MessagingResponse()), media_type="application/xml")
-
+    allowed_now = allowed_sender(sender, config)
     operator = operator_sender(sender, config)
+    masked_sender = f"***{sender[-4:]}" if sender else "(empty)"
+    masked_allowed = [
+        f"***{normalize_phone(x)[-4:]}"
+        for x in config.get("allowed_senders", [])
+        if normalize_phone(x)
+    ]
+    print(
+        "WHATSAPP_DIAG "
+        f"sender={masked_sender} allowed={allowed_now} operator={operator} "
+        f"allowed_list={masked_allowed}"
+    )
+    if not allowed_now:
+        return Response(content=str(MessagingResponse()), media_type="application/xml")
 
     # Only an explicitly authorized operator can create or query business data.
     pending_contacts = get_pending_contacts(sender) if operator else []
@@ -1002,6 +1013,7 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
             message_sid,
         )
         if combo_reply:
+            print(f"WHATSAPP_DIAG reply=combo sender={masked_sender}")
             response = MessagingResponse()
             response.message(combo_reply)
             return Response(content=str(response), media_type="application/xml")
