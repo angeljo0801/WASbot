@@ -151,6 +151,25 @@ class _KnowledgeChatPageState extends State<KnowledgeChatPage> {
     return null;
   }
 
+  String _friendlyAiError(Object error) {
+    final text = error.toString();
+    final lower = text.toLowerCase();
+    if (lower.contains('failed to load model') ||
+        lower.contains('no pude cargar el gguf') ||
+        lower.contains('modelo local no pudo cargarse')) {
+      return 'No pude cargar el modelo local. WhatsBot intentó también Local AI Manager. '
+          'Abre Ajustes de IA y usa Local AI Manager o vuelve a seleccionar el GGUF.';
+    }
+    if (lower.contains('local ai manager') &&
+        (lower.contains('no respondió') || lower.contains('comunicarme'))) {
+      return 'Local AI Manager no respondió. Ábrelo, carga el modelo y vuelve a intentar.';
+    }
+    final firstLine = text.split('\n').first.trim();
+    return firstLine.length > 260
+        ? firstLine.substring(0, 260) + '…'
+        : firstLine;
+  }
+
   String _excerpt(Note note) {
     final text = (note.content.trim().isNotEmpty
             ? note.content
@@ -254,7 +273,7 @@ class _KnowledgeChatPageState extends State<KnowledgeChatPage> {
         });
       });
     } catch (e) {
-      final message = 'No pude responder: $e';
+      final message = 'No pude responder: ' + _friendlyAiError(e);
       await store.addChatMessage('assistant', message);
       if (mounted) {
         setState(() => messages.add({'role': 'assistant', 'text': message}));
