@@ -9,6 +9,7 @@ import '../models/note.dart';
 import '../models/purchase_draft.dart';
 import '../services/api_service.dart';
 import '../services/knowledge_store.dart';
+import '../services/ocr_purchase_service.dart';
 import 'draft_review_page.dart';
 
 class NoteDetailPage extends StatefulWidget {
@@ -41,18 +42,64 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
   late Note note;
   PurchaseDraft? draft;
   bool working = false;
+  bool ocrWorking = false;
+  String? ocrStatus;
 
   @override
   void initState() {
     super.initState();
     note = widget.note;
-    loadDraft();
+    loadDraft().then((_) {
+      if (note.messageType == 'image' && draft == null) {
+        _runOcr(auto: true);
+      }
+    });
   }
 
   Future<void> loadDraft() async {
     final value = await KnowledgeStore.instance
         .draftForNote(KnowledgeStore.noteKey(note));
     if (mounted) setState(() => draft = value);
+  }
+
+  Future<void> _runOcr({bool force = false, bool auto = false}) async {
+    if (ocrWorking || note.messageType != 'image') return;
+    if (mounted) {
+      setState(() {
+        ocrWorking = true;
+        ocrStatus = auto
+            ? 'Analizando imagen automáticamente…'
+            : force
+                ? 'Reprocesando OCR…'
+                : 'Escaneando imagen con OCR…';
+      });
+    }
+
+    try {
+      final service = OcrPurchaseService(api: widget.api);
+      final result = await service.processImage(note, force: force);
+      if (!mounted) return;
+      if (result == null) {
+        setState(() {
+          ocrStatus = 'No pude procesar esta imagen con OCR.';
+        });
+        return;
+      }
+      setState(() {
+        draft = result.draft;
+        ocrStatus = result.ocrText.trim().isEmpty
+            ? 'OCR completado, pero no se detectó texto suficiente.'
+            : 'OCR listo · borrador preparado para revisar.';
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          ocrStatus = 'OCR falló: $e';
+        });
+      }
+    } finally {
+      if (mounted) setState(() => ocrWorking = false);
+    }
   }
 
   IconData get icon => switch (note.messageType) {
@@ -349,6 +396,94 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
                 ...note.tags.map((t) => Chip(label: Text('#$t'))),
               ],
             ),
+            if (note.messageType == 'image') ...[
+              const SizedBox(height: 14),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            draft != null
+                                ? Icons.document_scanner_outlined
+                                : Icons.auto_awesome_outlined,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              draft != null
+                                  ? 'OCR procesado'
+                                  : 'OCR de compra',
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                          ),
+                          if (ocrWorking)
+                            const SizedBox.square(
+                              dimension: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        ocrStatus ??
+                            (draft != null
+                                ? 'La imagen ya fue analizada y tiene un borrador listo para revisar.'
+                                : 'WhatsBot intentará leer la imagen automáticamente y preparar un borrador como en Paquetería.'),
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: FilledButton.icon(
+                              onPressed: ocrWorking
+                                  ? null
+                                  : () => _runOcr(force: draft != null),
+                              icon: Icon(
+                                draft == null
+                                    ? Icons.document_scanner_outlined
+                                    : Icons.refresh,
+                              ),
+                              label: Text(
+                                draft == null
+                                    ? 'Escanear con OCR'
+                                    : 'Reprocesar OCR',
+                              ),
+                            ),
+                          ),
+                          if (draft != null) ...[
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: () async {
+                                  final changed = await Navigator.push<bool>(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) => DraftReviewPage(
+                                        draft: draft!,
+                                        api: widget.api,
+                                      ),
+                                    ),
+                                  );
+                                  if (changed == true) {
+                                    await loadDraft();
+                                  }
+                                },
+                                icon: const Icon(Icons.preview_outlined),
+                                label: const Text('Ver borrador'),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
             if (draft?.pending == true) ...[
               const SizedBox(height: 14),
               Card(
