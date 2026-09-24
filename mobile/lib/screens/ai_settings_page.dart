@@ -257,6 +257,12 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                       'Ollama, LM Studio u otro servidor OpenAI-compatible.',
                     ),
                     choice(
+                      AiProvider.manager,
+                      Icons.hub_outlined,
+                      'Local AI Manager',
+                      'Usa el modelo compartido cargado en Local Manager sin volver a cargar otro GGUF en WhatsBot.',
+                    ),
+                    choice(
                       AiProvider.device,
                       Icons.memory,
                       'GGUF en este teléfono',
@@ -328,6 +334,42 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                       const Text(
                         'Si el servidor está en otro equipo, usa su IP local. '
                         '127.0.0.1 solo funciona si el servidor corre en el propio teléfono.',
+                      ),
+                    ],
+                    if (provider == AiProvider.manager) ...[
+                      Card(
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: const [
+                              Row(
+                                children: [
+                                  Icon(Icons.hub_outlined),
+                                  SizedBox(width: 10),
+                                  Expanded(
+                                    child: Text(
+                                      'Conexión con Local AI Manager',
+                                      style: TextStyle(
+                                        fontSize: 17,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              SizedBox(height: 8),
+                              Text(
+                                'WhatsBot usará el modelo que tengas cargado en Local Manager. '
+                                'No necesitas configurar una API key ni volver a cargar el modelo dentro de WhatsBot.',
+                              ),
+                              SizedBox(height: 8),
+                              Text(
+                                'Para usarlo, Local AI Manager debe estar instalado y tener un modelo activo.',
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                     ],
                     if (provider == AiProvider.device) ...[
