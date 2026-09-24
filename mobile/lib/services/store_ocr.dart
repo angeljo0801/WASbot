@@ -1,9 +1,9 @@
-double __number(dynamic value) {
+double _number(dynamic value) {
   if (value is num) return value.toDouble();
   return double.tryParse(value?.toString() ?? '') ?? 0.0;
 }
 
-String __newId() => DateTime.now().microsecondsSinceEpoch.toRadixString(36);
+String _newId() => DateTime.now().microsecondsSinceEpoch.toRadixString(36);
 
 
 class StoreOcrParse {
