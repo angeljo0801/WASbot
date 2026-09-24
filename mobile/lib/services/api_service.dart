@@ -200,7 +200,7 @@ class ApiService {
       final q = query.trim().toLowerCase();
       result = result
           .where(
-            (n) => '${n.title} ${n.content} ${n.tags.join(' ')}'
+            (n) => '${n.title} ${n.content} ${n.customerName} ${n.customerPhone} ${n.tags.join(' ')}'
                 .toLowerCase()
                 .contains(q),
           )
@@ -359,6 +359,9 @@ class ApiService {
     required String content,
     required String category,
     String? mediaPath,
+    String customerName = '',
+    String customerPhone = '',
+    List<String> photoPaths = const <String>[],
   }) async {
     final now = DateTime.now();
     final note = Note(
@@ -373,6 +376,9 @@ class ApiService {
       status: 'pending_sync',
       aiProvider: 'rules',
       mediaPath: mediaPath,
+      customerName: customerName,
+      customerPhone: normalizePhone(customerPhone),
+      photoPaths: photoPaths,
       createdAt: now,
     );
 
