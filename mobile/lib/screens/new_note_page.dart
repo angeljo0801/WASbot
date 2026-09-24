@@ -30,6 +30,7 @@ class _NewNotePageState extends State<NewNotePage> {
 
   final categories = const [
     'Inbox',
+    'Clientes',
     'Trabajo',
     'Personal',
     'Compras',
