@@ -3,6 +3,8 @@ import json
 import os
 import re
 import sqlite3
+import urllib.request
+import quopri
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -85,6 +87,22 @@ def init_db() -> None:
                 store TEXT NOT NULL DEFAULT 'WhatsBot',
                 total REAL NOT NULL DEFAULT 0,
                 photo_files TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pending_contact_requests (
+                sender TEXT PRIMARY KEY,
+                contacts_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS client_sync (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                external_id TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL DEFAULT '',
+                phone TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'whatsapp',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -221,6 +239,181 @@ def make_title(body: str, message_type: str) -> str:
         "document": "Documento de WhatsApp",
     }
     return labels.get(message_type, "Nota de WhatsApp")
+
+
+
+def _unfold_vcard(text: str) -> list[str]:
+    lines: list[str] = []
+    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if raw.startswith((" ", "\t")) and lines:
+            lines[-1] += raw[1:]
+        else:
+            lines.append(raw)
+    return lines
+
+
+def _decode_vcard_value(raw: str, header: str) -> str:
+    value = raw.strip()
+    if "QUOTED-PRINTABLE" in header.upper():
+        try:
+            value = quopri.decodestring(value).decode("utf-8", errors="replace")
+        except Exception:
+            pass
+    return value.replace("\\n", " ").replace("\\N", " ").strip()
+
+
+def parse_vcards(text: str) -> list[dict[str, str]]:
+    blocks = re.findall(
+        r"BEGIN:VCARD.*?END:VCARD",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    contacts: list[dict[str, str]] = []
+    for block in blocks:
+        name = ""
+        fallback_name = ""
+        phones: list[str] = []
+        for line in _unfold_vcard(block):
+            if ":" not in line:
+                continue
+            header, raw_value = line.split(":", 1)
+            key = header.split(";", 1)[0].upper()
+            value = _decode_vcard_value(raw_value, header)
+            if key == "FN" and value:
+                name = value
+            elif key == "N" and value and not fallback_name:
+                parts = [part.strip() for part in value.split(";")]
+                ordered: list[str] = []
+                if len(parts) > 3 and parts[3]:
+                    ordered.append(parts[3])
+                if len(parts) > 1 and parts[1]:
+                    ordered.append(parts[1])
+                if len(parts) > 2 and parts[2]:
+                    ordered.append(parts[2])
+                if parts and parts[0]:
+                    ordered.append(parts[0])
+                if len(parts) > 4 and parts[4]:
+                    ordered.append(parts[4])
+                fallback_name = " ".join(ordered).strip()
+            elif key == "TEL" and value:
+                phone = normalize_phone(value)
+                if phone and phone not in phones:
+                    phones.append(phone)
+        contact_name = name or fallback_name or "Contacto de WhatsApp"
+        if phones:
+            contacts.append({"name": contact_name, "phone": phones[0]})
+        elif contact_name != "Contacto de WhatsApp":
+            contacts.append({"name": contact_name, "phone": ""})
+    return contacts
+
+
+def download_twilio_media(url: str) -> bytes:
+    request = urllib.request.Request(url)
+    if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+        token = base64.b64encode(
+            f"{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}".encode("utf-8")
+        ).decode("ascii")
+        request.add_header("Authorization", f"Basic {token}")
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return response.read(2 * 1024 * 1024)
+
+
+def normalize_yes_no(value: str) -> str:
+    clean = value.strip().lower()
+    clean = (
+        clean.replace("í", "i")
+        .replace("á", "a")
+        .replace("é", "e")
+        .replace("ó", "o")
+        .replace("ú", "u")
+    )
+    clean = re.sub(r"[.!?,;:]+$", "", clean).strip()
+    if clean in {"si", "yes", "guardar", "guardalo", "guardarlos", "ok", "dale", "claro"}:
+        return "yes"
+    if clean in {"no", "cancelar", "cancela", "no guardar"}:
+        return "no"
+    return ""
+
+
+def save_pending_contacts(sender: str, contacts: list[dict[str, str]]) -> None:
+    with closing(db()) as conn:
+        conn.execute(
+            """
+            INSERT INTO pending_contact_requests(sender, contacts_json, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(sender) DO UPDATE SET
+                contacts_json=excluded.contacts_json,
+                created_at=excluded.created_at
+            """,
+            (normalize_phone(sender), json.dumps(contacts), utc_now()),
+        )
+        conn.commit()
+
+
+def get_pending_contacts(sender: str) -> list[dict[str, str]]:
+    with closing(db()) as conn:
+        row = conn.execute(
+            "SELECT contacts_json FROM pending_contact_requests WHERE sender = ?",
+            (normalize_phone(sender),),
+        ).fetchone()
+    if row is None:
+        return []
+    try:
+        raw = json.loads(row["contacts_json"] or "[]")
+        return [
+            {
+                "name": str(x.get("name", "")).strip(),
+                "phone": normalize_phone(str(x.get("phone", ""))),
+            }
+            for x in raw
+            if isinstance(x, dict)
+        ]
+    except Exception:
+        return []
+
+
+def clear_pending_contacts(sender: str) -> None:
+    with closing(db()) as conn:
+        conn.execute(
+            "DELETE FROM pending_contact_requests WHERE sender = ?",
+            (normalize_phone(sender),),
+        )
+        conn.commit()
+
+
+def approve_contacts_for_paqueteria(
+    sender: str,
+    contacts: list[dict[str, str]],
+) -> int:
+    now = utc_now()
+    saved = 0
+    with closing(db()) as conn:
+        for i, contact in enumerate(contacts):
+            name = str(contact.get("name", "")).strip() or "Cliente WhatsApp"
+            phone = normalize_phone(str(contact.get("phone", "")))
+            identity = phone or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+            external_id = f"whatsapp-contact-{identity}"
+            if not identity:
+                external_id = f"whatsapp-contact-{normalize_phone(sender)}-{i}"
+            conn.execute(
+                """
+                INSERT INTO client_sync(
+                    external_id, name, phone, source, created_at, updated_at
+                ) VALUES (?, ?, ?, 'whatsapp', ?, ?)
+                ON CONFLICT(external_id) DO UPDATE SET
+                    name=excluded.name,
+                    phone=excluded.phone,
+                    updated_at=excluded.updated_at
+                """,
+                (external_id, name, phone, now, now),
+            )
+            saved += 1
+        conn.execute(
+            "DELETE FROM pending_contact_requests WHERE sender = ?",
+            (normalize_phone(sender),),
+        )
+        conn.commit()
+    return saved
 
 
 class ConfigUpdate(BaseModel):
@@ -384,6 +577,31 @@ def delete_note(note_id: int) -> Response:
         conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
         conn.commit()
     return Response(status_code=204)
+
+
+
+@app.get("/api/clients", dependencies=[Depends(require_api_key)])
+def list_synced_clients() -> list[dict[str, Any]]:
+    with closing(db()) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, external_id, name, phone, source, created_at, updated_at
+            FROM client_sync
+            ORDER BY datetime(updated_at) DESC, id DESC
+            """
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "external_id": row["external_id"],
+                "name": row["name"],
+                "phone": row["phone"],
+                "source": row["source"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
 
 
 def purchase_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -550,14 +768,34 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
         )
 
     sender = normalize_phone(data.get("From"))
-    receiver = normalize_phone(data.get("To"))
     body = data.get("Body", "").strip()
     message_sid = data.get("MessageSid", "").strip() or None
 
     config = get_config()
     if not allowed_sender(sender, config):
-        # Return valid TwiML without replying; Twilio considers the webhook handled.
         return Response(content=str(MessagingResponse()), media_type="application/xml")
+
+    # If the previous WhatsApp message was a contact, a simple Sí/No confirms it.
+    pending_contacts = get_pending_contacts(sender)
+    answer = normalize_yes_no(body) if pending_contacts else ""
+    if answer:
+        response = MessagingResponse()
+        if answer == "yes":
+            count = approve_contacts_for_paqueteria(sender, pending_contacts)
+            if count == 1:
+                contact = pending_contacts[0]
+                label = contact.get("name") or contact.get("phone") or "El contacto"
+                response.message(
+                    f"{label} quedó guardado como cliente y se sincronizará con Paquetería."
+                )
+            else:
+                response.message(
+                    f"{count} contactos quedaron guardados como clientes y se sincronizarán con Paquetería."
+                )
+        else:
+            clear_pending_contacts(sender)
+            response.message("Perfecto, no lo guardaré como cliente.")
+        return Response(content=str(response), media_type="application/xml")
 
     try:
         num_media = int(data.get("NumMedia", "0") or "0")
@@ -565,7 +803,43 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
         num_media = 0
 
     media_url = data.get("MediaUrl0") if num_media > 0 else None
-    media_type = infer_message_type(data.get("MediaContentType0"), num_media)
+    content_type = (data.get("MediaContentType0") or "").lower()
+
+    # WhatsApp shared contacts arrive as vCard media. Parse them and ask first.
+    if num_media > 0 and media_url and (
+        "vcard" in content_type
+        or "x-vcard" in content_type
+        or content_type in {"text/directory", "application/octet-stream"}
+    ):
+        contacts: list[dict[str, str]] = []
+        try:
+            raw = download_twilio_media(media_url)
+            text = raw.decode("utf-8-sig", errors="replace")
+            if "BEGIN:VCARD" in text.upper():
+                contacts = parse_vcards(text)
+        except Exception:
+            contacts = []
+
+        if contacts:
+            save_pending_contacts(sender, contacts)
+            response = MessagingResponse()
+            if len(contacts) == 1:
+                contact = contacts[0]
+                phone_text = f" ({contact['phone']})" if contact.get("phone") else ""
+                response.message(
+                    f"Recibí el contacto {contact['name']}{phone_text}. "
+                    "¿Quieres guardarlo como cliente en Paquetería? Responde Sí o No."
+                )
+            else:
+                names = ", ".join(c["name"] for c in contacts[:3])
+                extra = f" y {len(contacts) - 3} más" if len(contacts) > 3 else ""
+                response.message(
+                    f"Recibí {len(contacts)} contactos: {names}{extra}. "
+                    "¿Quieres guardarlos como clientes en Paquetería? Responde Sí o No."
+                )
+            return Response(content=str(response), media_type="application/xml")
+
+    media_type = infer_message_type(content_type, num_media)
     title = make_title(body, media_type)
     content = body
     if not content and num_media > 0:
