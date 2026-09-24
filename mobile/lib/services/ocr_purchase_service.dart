@@ -33,7 +33,7 @@ class OcrPurchaseService {
     var value = raw.trim();
     value = value.replaceFirst(
       RegExp(
-        r'^(?:ship\\s+to|deliver\\s+to|delivery\\s+to|enviar\\s+a|env[ií]a\\s+a)\\s*[:\\-]?\\s*',
+        r'^(?:ship\s+to|deliver\s+to|delivery\s+to|enviar\s+a|env[ií]a\s+a)\s*[:-]?\s*',
         caseSensitive: false,
       ),
       '',
@@ -42,12 +42,13 @@ class OcrPurchaseService {
     if (value.contains(',')) {
       value = value.split(',').first.trim();
     }
-    final digit = RegExp(r'\\d').firstMatch(value);
+    final digit = RegExp(r'\d').firstMatch(value);
     if (digit != null && digit.start > 0) {
       value = value.substring(0, digit.start).trim();
     }
     value = value
-        .replaceAll(RegExp(r'^[^A-Za-zÀ-ÿ]+|[^A-Za-zÀ-ÿ .\\'-]+  Future<String?> _materializeImage(Note note) async {
+        .replaceAll(RegExp(r'^[^A-Za-zÀ-ÿ]+'), '')
+        .replaceAll(RegExp(r'[^A-Za-zÀ-ÿ .-]+  Future<String?> _materializeImage(Note note) async {
     final key = KnowledgeStore.noteKey(note);
     final state = await store.noteState(key);
     final cached = (state?['local_media_path'] ?? '').toString();
@@ -307,7 +308,7 @@ class OcrPurchaseService {
   }
 }
 ), '')
-        .replaceAll(RegExp(r'\\s+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
     return value;
   }
@@ -343,8 +344,8 @@ class OcrPurchaseService {
 
   String _extractCustomerCandidate(String text) {
     final lines = text
-        .split(RegExp(r'[\\r\\n]+'))
-        .map((e) => e.replaceAll(RegExp(r'\\s+'), ' ').trim())
+        .split(RegExp(r'[\r\n]+'))
+        .map((e) => e.replaceAll(RegExp(r'\s+'), ' ').trim())
         .where((e) => e.isNotEmpty)
         .toList();
 
@@ -373,7 +374,7 @@ class OcrPurchaseService {
     }
 
     for (final line in lines) {
-      if (!RegExp(r'^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .\\'-]{1,60},\\s*\\d')
+      if (!RegExp(r'^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .-]{1,60},\s*\d')
           .hasMatch(line)) {
         continue;
       }
@@ -393,16 +394,15 @@ class OcrPurchaseService {
       if (n.isEmpty) return const <Map<String, dynamic>>[];
       final oneWord = !n.contains(' ');
       return clients.where((client) {
-        final clientName = store.normalizeName(
-          (client['name'] ?? '').toString(),
-        );
+        final clientName =
+            store.normalizeName((client['name'] ?? '').toString());
         if (clientName.isEmpty) return false;
         if (oneWord) {
-          return clientName == n || clientName.startsWith('$n ');
+          return clientName == n || clientName.startsWith(n + ' ');
         }
         return clientName == n ||
-            clientName.startsWith('$n ') ||
-            n.startsWith('$clientName ');
+            clientName.startsWith(n + ' ') ||
+            n.startsWith(clientName + ' ');
       }).toList();
     }
 
@@ -419,20 +419,23 @@ class OcrPurchaseService {
         return {
           'name': candidate,
           'phone': '',
-          'warning':
-              'Encontré “$candidate” en la imagen, pero coincide con ${matches.length} clientes. Elige cuál es antes de confirmar.',
+          'warning': 'Encontré “' +
+              candidate +
+              '” en la imagen, pero coincide con ' +
+              matches.length.toString() +
+              ' clientes. Elige cuál es antes de confirmar.',
         };
       }
       return {'name': candidate, 'phone': '', 'warning': ''};
     }
 
-    final normalizedText = ' ${store.normalizeName(text)} ';
+    final normalizedText = ' ' + store.normalizeName(text) + ' ';
     final fullMatches = <Map<String, dynamic>>[];
     var longest = 0;
     for (final client in clients) {
       final name = store.normalizeName((client['name'] ?? '').toString());
       if (name.length < 3) continue;
-      if (!normalizedText.contains(' $name ')) continue;
+      if (!normalizedText.contains(' ' + name + ' ')) continue;
       if (name.length > longest) {
         longest = name.length;
         fullMatches
@@ -442,22 +445,25 @@ class OcrPurchaseService {
         fullMatches.add(client);
       }
     }
+
     if (fullMatches.length == 1) {
       final client = fullMatches.first;
       final name = (client['name'] ?? '').toString().trim();
-      final n = store.normalizeName(name);
-      if (!n.contains(' ')) {
+      final normalizedName = store.normalizeName(name);
+      if (!normalizedName.contains(' ')) {
         final sameFirst = clients.where((other) {
           final otherName =
               store.normalizeName((other['name'] ?? '').toString());
-          return otherName == n || otherName.startsWith('$n ');
+          return otherName == normalizedName ||
+              otherName.startsWith(normalizedName + ' ');
         }).toList();
         if (sameFirst.length > 1) {
           return {
             'name': name,
             'phone': '',
-            'warning':
-                'El OCR encontró “$name”, pero hay varios clientes con ese nombre. Elige cuál es antes de confirmar.',
+            'warning': 'El OCR encontró “' +
+                name +
+                '”, pero hay varios clientes con ese nombre. Elige cuál es antes de confirmar.',
           };
         }
       }
@@ -467,16 +473,19 @@ class OcrPurchaseService {
         'warning': '',
       };
     }
+
     if (fullMatches.length > 1) {
       final label =
           (fullMatches.first['name'] ?? 'ese nombre').toString().trim();
       return {
         'name': label,
         'phone': '',
-        'warning':
-            'El OCR encontró “$label”, pero hay varios clientes coincidentes. Elige el cliente correcto antes de confirmar.',
+        'warning': 'El OCR encontró “' +
+            label +
+            '”, pero hay varios clientes coincidentes. Elige el cliente correcto antes de confirmar.',
       };
     }
+
     return const {'name': '', 'phone': '', 'warning': ''};
   }
 
