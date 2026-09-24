@@ -253,6 +253,7 @@ class _HomePageState extends State<HomePage> {
         'image' => Icons.image_outlined,
         'audio' => Icons.mic_none,
         'document' => Icons.description_outlined,
+        'contact' => Icons.person_add_alt_1_outlined,
         _ => Icons.notes_outlined,
       };
 
