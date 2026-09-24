@@ -1,15 +1,59 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:open_filex/open_filex.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../models/note.dart';
+import '../models/purchase_draft.dart';
 import '../services/api_service.dart';
+import '../services/knowledge_store.dart';
+import 'draft_review_page.dart';
 
-class NoteDetailPage extends StatelessWidget {
+class NoteDetailPage extends StatefulWidget {
   final Note note;
   final ApiService api;
 
-  const NoteDetailPage({super.key, required this.note, required this.api});
+  const NoteDetailPage({
+    super.key,
+    required this.note,
+    required this.api,
+  });
+
+  @override
+  State<NoteDetailPage> createState() => _NoteDetailPageState();
+}
+
+class _NoteDetailPageState extends State<NoteDetailPage> {
+  static const categories = [
+    'Inbox',
+    'Trabajo',
+    'Personal',
+    'Compras',
+    'Gastos',
+    'Ideas',
+    'Documentos',
+    'Recordatorios',
+    'Fotos',
+  ];
+
+  late Note note;
+  PurchaseDraft? draft;
+  bool working = false;
+
+  @override
+  void initState() {
+    super.initState();
+    note = widget.note;
+    loadDraft();
+  }
+
+  Future<void> loadDraft() async {
+    final value = await KnowledgeStore.instance
+        .draftForNote(KnowledgeStore.noteKey(note));
+    if (mounted) setState(() => draft = value);
+  }
 
   IconData get icon => switch (note.messageType) {
         'image' => Icons.image_outlined,
@@ -19,35 +63,268 @@ class NoteDetailPage extends StatelessWidget {
       };
 
   String get aiLabel => switch (note.aiProvider) {
-        'local' => 'IA local',
+        'openai' => 'OpenAI',
+        'gemini' => 'Gemini',
+        'local_server' => 'IA local',
+        'manager' => 'Local AI Manager',
+        'local' => 'GGUF local',
         'server' => 'IA servidor',
         _ => 'Reglas',
       };
 
-  String get syncLabel => switch (note.status) {
-        'pending_sync' => 'Pendiente de sincronizar',
-        'synced' => 'Sincronizada',
-        _ => note.status,
-      };
+  Future<String?> _localMedia() async {
+    final raw = note.mediaPath?.trim() ?? '';
+    if (raw.isEmpty) return null;
+    final direct = File(raw);
+    if (await direct.exists()) return direct.path;
+
+    final bytes = await widget.api.fetchMediaBytes(raw);
+    if (bytes == null || bytes.isEmpty) return null;
+    final docs = await getApplicationDocumentsDirectory();
+    final folder = Directory('${docs.path}/shared_inbox');
+    if (!await folder.exists()) await folder.create(recursive: true);
+
+    var ext = '.bin';
+    final lower = raw.toLowerCase();
+    for (final candidate in [
+      '.jpg',
+      '.jpeg',
+      '.png',
+      '.webp',
+      '.pdf',
+      '.doc',
+      '.docx',
+      '.xls',
+      '.xlsx',
+      '.txt',
+      '.zip',
+      '.mp3',
+      '.m4a',
+      '.mp4'
+    ]) {
+      if (lower.contains(candidate)) {
+        ext = candidate;
+        break;
+      }
+    }
+    if (note.messageType == 'image' && ext == '.bin') ext = '.jpg';
+    final safe = KnowledgeStore.noteKey(note)
+        .replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+    final file = File('${folder.path}/$safe$ext');
+    await file.writeAsBytes(bytes, flush: true);
+    return file.path;
+  }
+
+  Future<void> classify() async {
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      builder: (_) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: categories
+              .map(
+                (c) => ListTile(
+                  leading: Icon(c == note.category
+                      ? Icons.check_circle
+                      : Icons.label_outline),
+                  title: Text(c),
+                  onTap: () => Navigator.pop(context, c),
+                ),
+              )
+              .toList(),
+        ),
+      ),
+    );
+    if (selected == null || selected == note.category) return;
+    setState(() => working = true);
+    try {
+      note = await widget.api.updateNoteManual(note, category: selected);
+      if (mounted) setState(() {});
+    } finally {
+      if (mounted) setState(() => working = false);
+    }
+  }
+
+  Future<void> shareNote() async {
+    setState(() => working = true);
+    try {
+      final local = await _localMedia();
+      final text = [
+        note.title,
+        if (note.content.trim().isNotEmpty) note.content,
+      ].join('\n\n');
+      if (local != null) {
+        await SharePlus.instance.share(
+          ShareParams(
+            text: text,
+            files: [XFile(local)],
+            subject: note.title,
+          ),
+        );
+      } else {
+        await SharePlus.instance.share(
+          ShareParams(text: text, subject: note.title),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => working = false);
+    }
+  }
+
+  Future<void> openOriginal() async {
+    setState(() => working = true);
+    try {
+      final local = await _localMedia();
+      if (local == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No pude preparar el archivo.')),
+          );
+        }
+        return;
+      }
+      await OpenFilex.open(local);
+    } finally {
+      if (mounted) setState(() => working = false);
+    }
+  }
+
+  Future<void> combine() async {
+    final all = await widget.api.getNotes();
+    final candidates = all.where((n) => n.id != note.id).take(60).toList();
+    if (!mounted || candidates.isEmpty) return;
+    final selected = <int>{};
+    final ok = await showDialog<bool>(
+          context: context,
+          builder: (context) => StatefulBuilder(
+            builder: (context, setDialog) => AlertDialog(
+              title: const Text('Combinar notas'),
+              content: SizedBox(
+                width: double.maxFinite,
+                height: 420,
+                child: ListView(
+                  children: candidates
+                      .map(
+                        (other) => CheckboxListTile(
+                          value: selected.contains(other.id),
+                          title: Text(other.title),
+                          subtitle: Text(
+                            other.content.replaceAll('\n', ' '),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          onChanged: (v) => setDialog(() {
+                            if (v == true) {
+                              selected.add(other.id);
+                            } else {
+                              selected.remove(other.id);
+                            }
+                          }),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Cancelar'),
+                ),
+                FilledButton(
+                  onPressed: selected.isEmpty
+                      ? null
+                      : () => Navigator.pop(context, true),
+                  child: const Text('Combinar'),
+                ),
+              ],
+            ),
+          ),
+        ) ??
+        false;
+    if (!ok) return;
+
+    final chosen = [
+      note,
+      ...candidates.where((n) => selected.contains(n.id)),
+    ];
+    final content = chosen
+        .map(
+          (n) =>
+              '--- ${n.title} ---\n${n.content.trim().isNotEmpty ? n.content : n.originalText}',
+        )
+        .join('\n\n');
+    final merged = await widget.api.createNote(
+      title: 'Combinada: ${note.title}',
+      content: content,
+      category: note.category,
+    );
+
+    final knowledge = KnowledgeStore.instance;
+    final entities = await knowledge.entities();
+    final sourceKeys = chosen.map(KnowledgeStore.noteKey).toSet();
+    for (final entity in entities) {
+      final keys = (await knowledge.noteKeysForEntity(entity.id)).toSet();
+      if (keys.intersection(sourceKeys).isNotEmpty) {
+        await knowledge.linkEntity(
+          entity.id,
+          KnowledgeStore.noteKey(merged),
+          relation: 'combinado',
+        );
+      }
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Nota combinada creada; las originales se conservaron.'),
+        ),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final photos = note.photoPaths
-        .where((path) => File(path).existsSync())
-        .toList();
-    if (photos.isEmpty &&
+    final localPhotos = <String>[];
+    for (final path in note.photoPaths) {
+      if (File(path).existsSync()) localPhotos.add(path);
+    }
+    if (localPhotos.isEmpty &&
         note.mediaPath != null &&
-        File(note.mediaPath!).existsSync()) {
-      photos.add(note.mediaPath!);
+        File(note.mediaPath!).existsSync() &&
+        note.messageType == 'image') {
+      localPhotos.add(note.mediaPath!);
     }
 
     return Scaffold(
       appBar: AppBar(
         title: Text(note.title),
         actions: [
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Icon(icon),
+          IconButton(
+            tooltip: 'Clasificar',
+            onPressed: working ? null : classify,
+            icon: const Icon(Icons.drive_file_move_outline),
+          ),
+          IconButton(
+            tooltip: 'Compartir',
+            onPressed: working ? null : shareNote,
+            icon: const Icon(Icons.share_outlined),
+          ),
+          PopupMenuButton<String>(
+            onSelected: (value) {
+              if (value == 'combine') combine();
+              if (value == 'open') openOriginal();
+            },
+            itemBuilder: (_) => [
+              const PopupMenuItem(
+                value: 'combine',
+                child: Text('Combinar con otras notas'),
+              ),
+              if (note.mediaPath?.isNotEmpty == true)
+                const PopupMenuItem(
+                  value: 'open',
+                  child: Text('Abrir archivo original'),
+                ),
+            ],
           ),
         ],
       ),
@@ -59,109 +336,109 @@ class NoteDetailPage extends StatelessWidget {
               spacing: 8,
               runSpacing: 8,
               children: [
-                Chip(label: Text(note.category)),
-                Chip(label: Text(note.source == 'whatsapp' ? 'WhatsApp' : 'Manual')),
+                ActionChip(
+                  avatar: const Icon(Icons.label_outline, size: 18),
+                  label: Text(note.category),
+                  onPressed: working ? null : classify,
+                ),
+                Chip(
+                  label:
+                      Text(note.source == 'whatsapp' ? 'WhatsApp' : 'Manual'),
+                ),
                 Chip(label: Text(aiLabel)),
-                if (note.isLocalRecord || note.status != 'ready')
-                  Chip(label: Text(syncLabel)),
                 ...note.tags.map((t) => Chip(label: Text('#$t'))),
               ],
             ),
-            if (note.isPurchase &&
-                (note.customerName.isNotEmpty || note.customerPhone.isNotEmpty)) ...[
-              const SizedBox(height: 16),
+            if (draft?.pending == true) ...[
+              const SizedBox(height: 14),
               Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(14),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Cliente',
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                      const SizedBox(height: 8),
-                      if (note.customerName.isNotEmpty)
-                        Row(
-                          children: [
-                            const Icon(Icons.person_outline, size: 20),
-                            const SizedBox(width: 8),
-                            Expanded(child: SelectableText(note.customerName)),
-                          ],
-                        ),
-                      if (note.customerPhone.isNotEmpty) ...[
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            const Icon(Icons.phone_outlined, size: 20),
-                            const SizedBox(width: 8),
-                            Expanded(child: SelectableText(note.customerPhone)),
-                          ],
-                        ),
-                      ],
-                    ],
+                child: ListTile(
+                  leading: const Icon(Icons.pending_actions_outlined),
+                  title: const Text('Pedido detectado · pendiente'),
+                  subtitle: Text(
+                    draft!.customerName.isEmpty
+                        ? 'OCR listo. Revisa y asigna el cliente.'
+                        : 'Cliente: ${draft!.customerName} · ${draft!.store}',
                   ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () async {
+                    final changed = await Navigator.push<bool>(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => DraftReviewPage(
+                          draft: draft!,
+                          api: widget.api,
+                        ),
+                      ),
+                    );
+                    if (changed == true) loadDraft();
+                  },
                 ),
               ),
             ],
-            if (photos.isEmpty &&
-                note.messageType == 'image' &&
-                note.mediaPath != null &&
-                note.mediaPath!.isNotEmpty &&
-                !File(note.mediaPath!).existsSync()) ...[
+            if (note.isPurchase &&
+                (note.customerName.isNotEmpty ||
+                    note.customerPhone.isNotEmpty)) ...[
+              const SizedBox(height: 14),
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.person_outline),
+                  title: Text(note.customerName.isEmpty
+                      ? 'Cliente'
+                      : note.customerName),
+                  subtitle: note.customerPhone.isEmpty
+                      ? null
+                      : SelectableText(note.customerPhone),
+                ),
+              ),
+            ],
+            if (localPhotos.isNotEmpty) ...[
+              const SizedBox(height: 18),
+              SizedBox(
+                height: 280,
+                child: PageView.builder(
+                  itemCount: localPhotos.length,
+                  itemBuilder: (_, index) => ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: Image.file(
+                      File(localPhotos[index]),
+                      fit: BoxFit.contain,
+                    ),
+                  ),
+                ),
+              ),
+            ] else if (note.messageType == 'image' &&
+                note.mediaPath?.isNotEmpty == true) ...[
               const SizedBox(height: 18),
               FutureBuilder(
-                future: api.fetchMediaBytes(note.mediaPath!),
+                future: widget.api.fetchMediaBytes(note.mediaPath!),
                 builder: (context, snapshot) {
-                  final bytes = snapshot.data;
                   if (snapshot.connectionState == ConnectionState.waiting) {
                     return const SizedBox(
-                      height: 180,
+                      height: 200,
                       child: Center(child: CircularProgressIndicator()),
                     );
                   }
+                  final bytes = snapshot.data;
                   if (bytes == null || bytes.isEmpty) {
-                    return const Card(
-                      child: Padding(
-                        padding: EdgeInsets.all(14),
-                        child: Text('La imagen está guardada en el servidor, pero no se pudo cargar ahora.'),
-                      ),
-                    );
+                    return const Text('No se pudo cargar la imagen.');
                   }
                   return ClipRRect(
                     borderRadius: BorderRadius.circular(16),
-                    child: Image.memory(
-                      bytes,
-                      width: double.infinity,
-                      fit: BoxFit.contain,
-                    ),
+                    child: Image.memory(bytes, fit: BoxFit.contain),
                   );
                 },
               ),
             ],
-            if (photos.isNotEmpty) ...[
+            if (note.messageType == 'document' ||
+                note.messageType == 'audio' ||
+                note.messageType == 'video') ...[
               const SizedBox(height: 18),
-              SizedBox(
-                height: 260,
-                child: PageView.builder(
-                  itemCount: photos.length,
-                  itemBuilder: (_, index) => Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(16),
-                      child: Image.file(
-                        File(photos[index]),
-                        width: double.infinity,
-                        fit: BoxFit.contain,
-                      ),
-                    ),
-                  ),
-                ),
+              FilledButton.tonalIcon(
+                onPressed: working ? null : openOriginal,
+                icon: const Icon(Icons.open_in_new),
+                label: const Text('Abrir / previsualizar archivo'),
               ),
-              if (photos.length > 1) ...[
-                const SizedBox(height: 6),
-                Center(child: Text('${photos.length} fotos')),
-              ],
             ],
             const SizedBox(height: 18),
             SelectableText(
@@ -171,23 +448,17 @@ class NoteDetailPage extends StatelessWidget {
             if (note.originalText.isNotEmpty &&
                 note.originalText != note.content) ...[
               const SizedBox(height: 28),
-              Text('Original', style: Theme.of(context).textTheme.titleMedium),
+              Text('Original',
+                  style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 8),
               SelectableText(note.originalText),
             ],
-            if (note.mediaPath != null &&
-                photos.isEmpty) ...[
-              const SizedBox(height: 28),
-              Text(
-                'Archivo original conservado',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 6),
-              Text(
-                note.mediaPath!,
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ],
+            const SizedBox(height: 24),
+            OutlinedButton.icon(
+              onPressed: working ? null : shareNote,
+              icon: const Icon(Icons.share_outlined),
+              label: const Text('Compartir nota / archivo'),
+            ),
           ],
         ),
       ),
