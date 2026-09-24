@@ -40,26 +40,6 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Verify persistent signing secrets
-        env:
-          WHATSBOT_KEYSTORE_B64: ${{ secrets.WHATSBOT_KEYSTORE_B64 }}
-          WHATSBOT_KEYSTORE_PASSWORD: ${{ secrets.WHATSBOT_KEYSTORE_PASSWORD }}
-          WHATSBOT_KEY_ALIAS: ${{ secrets.WHATSBOT_KEY_ALIAS }}
-          WHATSBOT_KEY_PASSWORD: ${{ secrets.WHATSBOT_KEY_PASSWORD }}
-        shell: bash
-        run: |
-          missing=0
-          for name in WHATSBOT_KEYSTORE_B64 WHATSBOT_KEYSTORE_PASSWORD WHATSBOT_KEY_ALIAS WHATSBOT_KEY_PASSWORD; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Missing secret $name"
-              missing=1
-            fi
-          done
-          if [ "$missing" -ne 0 ]; then
-            echo "::error::WhatsBot will not publish an APK with temporary signing."
-            exit 1
-          fi
-
       - name: Generate Android platform files
         working-directory: mobile
         run: |
@@ -204,6 +184,26 @@ jobs:
       - name: Analyze
         working-directory: mobile
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Verify persistent signing secrets
+        env:
+          WHATSBOT_KEYSTORE_B64: ${{ secrets.WHATSBOT_KEYSTORE_B64 }}
+          WHATSBOT_KEYSTORE_PASSWORD: ${{ secrets.WHATSBOT_KEYSTORE_PASSWORD }}
+          WHATSBOT_KEY_ALIAS: ${{ secrets.WHATSBOT_KEY_ALIAS }}
+          WHATSBOT_KEY_PASSWORD: ${{ secrets.WHATSBOT_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          missing=0
+          for name in WHATSBOT_KEYSTORE_B64 WHATSBOT_KEYSTORE_PASSWORD WHATSBOT_KEY_ALIAS WHATSBOT_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing secret $name"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::WhatsBot will not publish an APK with temporary signing."
+            exit 1
+          fi
 
       - name: Build stable release APK
         working-directory: mobile
