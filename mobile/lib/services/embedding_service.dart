@@ -193,7 +193,7 @@ class EmbeddingService {
   }) {
     final words = query
         .toLowerCase()
-        .split(RegExp(r'[^\p{L}\p{N}]+', unicode: true))
+        .split(RegExp(r'[^a-z0-9áéíóúüñ]+', caseSensitive: false))
         .where((e) => e.length > 1)
         .toSet();
     final hits = <SemanticHit>[];
