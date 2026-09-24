@@ -3,11 +3,13 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../models/note.dart';
+import '../services/api_service.dart';
 
 class NoteDetailPage extends StatelessWidget {
   final Note note;
+  final ApiService api;
 
-  const NoteDetailPage({super.key, required this.note});
+  const NoteDetailPage({super.key, required this.note, required this.api});
 
   IconData get icon => switch (note.messageType) {
         'image' => Icons.image_outlined,
@@ -100,6 +102,41 @@ class NoteDetailPage extends StatelessWidget {
                     ],
                   ),
                 ),
+              ),
+            ],
+            if (photos.isEmpty &&
+                note.messageType == 'image' &&
+                note.mediaPath != null &&
+                note.mediaPath!.isNotEmpty &&
+                !File(note.mediaPath!).existsSync()) ...[
+              const SizedBox(height: 18),
+              FutureBuilder(
+                future: api.fetchMediaBytes(note.mediaPath!),
+                builder: (context, snapshot) {
+                  final bytes = snapshot.data;
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return const SizedBox(
+                      height: 180,
+                      child: Center(child: CircularProgressIndicator()),
+                    );
+                  }
+                  if (bytes == null || bytes.isEmpty) {
+                    return const Card(
+                      child: Padding(
+                        padding: EdgeInsets.all(14),
+                        child: Text('La imagen está guardada en el servidor, pero no se pudo cargar ahora.'),
+                      ),
+                    );
+                  }
+                  return ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: Image.memory(
+                      bytes,
+                      width: double.infinity,
+                      fit: BoxFit.contain,
+                    ),
+                  );
+                },
               ),
             ],
             if (photos.isNotEmpty) ...[
