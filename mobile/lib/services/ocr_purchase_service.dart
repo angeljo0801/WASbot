@@ -59,11 +59,14 @@ class OcrPurchaseService {
     return file.path;
   }
 
-  Future<OcrPurchaseResult?> processImage(Note note) async {
+  Future<OcrPurchaseResult?> processImage(
+    Note note, {
+    bool force = false,
+  }) async {
     if (note.messageType != 'image') return null;
     final key = KnowledgeStore.noteKey(note);
     final existing = await store.draftForNote(key);
-    if (await store.isOcrProcessed(key) && existing != null) {
+    if (!force && await store.isOcrProcessed(key) && existing != null) {
       return OcrPurchaseResult(
         draft: existing,
         ocrText: existing.ocrText,
