@@ -287,6 +287,10 @@ class AiProviderService {
         'type': 'cliente',
       });
     }
+
+    // Images are handled by the structured OCR purchase parser.
+    // Do not turn arbitrary OCR lines into entities.
+    if (note.messageType == 'image') return out;
     if (settingsValue.provider == AiProvider.rules) return out;
 
     final source = [
