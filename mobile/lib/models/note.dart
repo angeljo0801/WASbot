@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 class Note {
   final int id;
   final int? remoteId;
@@ -17,6 +19,8 @@ class Note {
   final String replyText;
   final String replyError;
   final DateTime? repliedAt;
+  final String conversationContext;
+  final String businessContext;
   final String customerName;
   final String customerPhone;
   final List<String> photoPaths;
@@ -42,6 +46,8 @@ class Note {
     this.replyText = '',
     this.replyError = '',
     this.repliedAt,
+    this.conversationContext = '',
+    this.businessContext = '',
     this.customerName = '',
     this.customerPhone = '',
     this.photoPaths = const <String>[],
@@ -70,6 +76,10 @@ class Note {
         replyText: (json['reply_text'] ?? '').toString(),
         replyError: (json['reply_error'] ?? '').toString(),
         repliedAt: DateTime.tryParse((json['replied_at'] ?? '').toString()),
+        conversationContext: (json['conversation_context'] ?? '').toString(),
+        businessContext: json['business_context'] is Map || json['business_context'] is List
+            ? jsonEncode(json['business_context'])
+            : (json['business_context'] ?? '').toString(),
         customerName: (json['customer_name'] ?? '').toString(),
         customerPhone: (json['customer_phone'] ?? '').toString(),
         photoPaths: ((json['photo_paths'] as List?) ?? const [])
@@ -97,6 +107,8 @@ class Note {
     String? replyText,
     String? replyError,
     DateTime? repliedAt,
+    String? conversationContext,
+    String? businessContext,
     String? customerName,
     String? customerPhone,
     List<String>? photoPaths,
@@ -121,6 +133,8 @@ class Note {
         replyText: replyText ?? this.replyText,
         replyError: replyError ?? this.replyError,
         repliedAt: repliedAt ?? this.repliedAt,
+        conversationContext: conversationContext ?? this.conversationContext,
+        businessContext: businessContext ?? this.businessContext,
         customerName: customerName ?? this.customerName,
         customerPhone: customerPhone ?? this.customerPhone,
         photoPaths: photoPaths ?? this.photoPaths,
@@ -146,6 +160,8 @@ class Note {
         'reply_text': replyText,
         'reply_error': replyError,
         'replied_at': repliedAt?.toIso8601String(),
+        'conversation_context': conversationContext,
+        'business_context': businessContext,
         'customer_name': customerName,
         'customer_phone': customerPhone,
         'photo_paths': photoPaths,
