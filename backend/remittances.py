@@ -473,7 +473,8 @@ def upsert_ocr_remittance(
             display_date = local.strftime("%m/%d/%Y")
 
     amount_text = "$" + f"{cents / 100:.2f}" if cents > 0 else ""
-    lines = [f"Origen: {source_clean.capitalize()}"]
+    source_label = "PayPal" if source_clean == "paypal" else "Zelle"
+    lines = [f"Origen: {source_label}"]
     if clean_name:
         lines.append(f"Nombre: {clean_name}")
     if amount_text:
@@ -481,7 +482,7 @@ def upsert_ocr_remittance(
     if display_date:
         lines.append(f"Fecha: {display_date}")
     content = "\n".join(lines)
-    title_parts = ["Remesa", source_clean.capitalize()]
+    title_parts = ["Remesa", source_label]
     if amount_text:
         title_parts.append(amount_text)
     title = " · ".join(title_parts)
