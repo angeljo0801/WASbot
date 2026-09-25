@@ -18,6 +18,17 @@ from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 
 from combo import router as combo_router, looks_like_purchase, pending_purchase, process_operator_message
+from assistant_features import (
+    business_context_for_sender,
+    conversation_context,
+    conversation_messages,
+    list_activity,
+    list_conversations,
+    log_activity,
+    ocr_hints,
+    record_ocr_correction,
+    remember_client_alias,
+)
 from remittances import (
     ensure_daily_code,
     get_agents as get_remittance_agents,
@@ -681,6 +692,13 @@ class AiReplyRequest(BaseModel):
     body: str
 
 
+class OcrCorrectionCreate(BaseModel):
+    source: str
+    field: str
+    original: str
+    corrected: str
+
+
 class ClientSyncCreate(BaseModel):
     external_id: str
     name: str
@@ -836,6 +854,37 @@ def remittance_ocr_upsert(payload: RemittanceOcrUpsert) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@app.get("/api/conversations", dependencies=[Depends(require_api_key)])
+def api_conversations(limit: int = 100) -> list[dict[str, Any]]:
+    return list_conversations(limit)
+
+
+@app.get("/api/conversations/{sender:path}", dependencies=[Depends(require_api_key)])
+def api_conversation_messages(sender: str, limit: int = 100) -> list[dict[str, Any]]:
+    return conversation_messages(sender, limit)
+
+
+@app.get("/api/activity", dependencies=[Depends(require_api_key)])
+def api_activity(limit: int = 100) -> list[dict[str, Any]]:
+    return list_activity(limit)
+
+
+@app.post("/api/ocr/corrections", dependencies=[Depends(require_api_key)])
+def api_ocr_correction(payload: OcrCorrectionCreate) -> dict[str, Any]:
+    saved = record_ocr_correction(
+        payload.source,
+        payload.field,
+        payload.original,
+        payload.corrected,
+    )
+    return {"ok": True, "saved": saved}
+
+
+@app.get("/api/ocr/corrections", dependencies=[Depends(require_api_key)])
+def api_ocr_corrections(source: str) -> list[dict[str, Any]]:
+    return ocr_hints(source)
+
+
 @app.get("/api/notes", dependencies=[Depends(require_api_key)])
 def list_notes(q: str = "", category: str = "") -> list[dict[str, Any]]:
     sql = "SELECT * FROM notes WHERE 1=1"
@@ -851,7 +900,13 @@ def list_notes(q: str = "", category: str = "") -> list[dict[str, Any]]:
 
     with closing(db()) as conn:
         rows = conn.execute(sql, params).fetchall()
-        return [note_row(row) for row in rows]
+        result = []
+        for row in rows:
+            item = note_row(row)
+            item["conversation_context"] = conversation_context(row["sender"])
+            item["business_context"] = business_context_for_sender(row["sender"])
+            result.append(item)
+        return result
 
 
 @app.post("/api/notes", status_code=201, dependencies=[Depends(require_api_key)])
@@ -1005,6 +1060,30 @@ def upsert_synced_client(payload: ClientSyncCreate) -> dict[str, Any]:
             "SELECT * FROM client_sync WHERE external_id = ?",
             (canonical_external,),
         ).fetchone()
+        remember_client_alias(
+            canonical_external,
+            row["name"],
+            "name",
+            row["name"],
+            source=source,
+        )
+        if row["phone"]:
+            remember_client_alias(
+                canonical_external,
+                row["name"],
+                "phone",
+                row["phone"],
+                source=source,
+            )
+        log_activity(
+            "client_identity",
+            detail={
+                "client_id": canonical_external,
+                "name": row["name"],
+                "phone": row["phone"],
+                "source": source,
+            },
+        )
         return {
             "id": row["id"],
             "external_id": row["external_id"],
@@ -1274,6 +1353,13 @@ def send_ai_reply(note_id: int, payload: AiReplyRequest) -> dict[str, Any]:
                 (str(exc)[:500], utc_now(), note_id),
             )
             conn.commit()
+        log_activity(
+            "whatsapp_reply",
+            status="failed",
+            sender=sender,
+            note_id=note_id,
+            detail={"error": str(exc)[:300]},
+        )
         raise HTTPException(
             status_code=502,
             detail="Twilio could not send the WhatsApp reply",
@@ -1295,6 +1381,17 @@ def send_ai_reply(note_id: int, payload: AiReplyRequest) -> dict[str, Any]:
         )
         conn.commit()
 
+    log_activity(
+        "whatsapp_reply",
+        status="sent",
+        sender=sender,
+        note_id=note_id,
+        detail={
+            "sid_tail": sent.get("sid", "")[-6:],
+            "twilio_status": sent.get("status", ""),
+            "preview": body[:180],
+        },
+    )
     return {
         "ok": True,
         "already_sent": False,
@@ -1518,7 +1615,19 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
                 utc_now(),
             ),
         )
+        note_id = int(cur.lastrowid)
         conn.commit()
+
+    log_activity(
+        "whatsapp_inbound",
+        sender=sender,
+        note_id=note_id,
+        detail={
+            "message_type": media_type,
+            "message_sid_tail": (message_sid or "")[-6:],
+            "preview": body[:180],
+        },
+    )
 
     response = MessagingResponse()
     if ACK_ENABLED:
