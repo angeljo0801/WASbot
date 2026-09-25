@@ -674,6 +674,55 @@ class ApiService {
     }
   }
 
+  Future<List<Note>> pendingWhatsAppReplies({int limit = 10}) async {
+    final url = await baseUrl;
+    if (url.isEmpty) return const <Note>[];
+
+    final safeLimit = limit.clamp(1, 20);
+    try {
+      final uri = Uri.parse('$url/api/whatsapp/replies/pending').replace(
+        queryParameters: {'limit': safeLimit.toString()},
+      );
+      final r = await http
+          .get(uri, headers: await _headers())
+          .timeout(const Duration(seconds: 12));
+      if (r.statusCode != 200) return const <Note>[];
+
+      final decoded = jsonDecode(r.body);
+      if (decoded is! List) return const <Note>[];
+      return decoded
+          .whereType<Map>()
+          .map((e) => Note.fromJson(Map<String, dynamic>.from(e)))
+          .toList();
+    } catch (_) {
+      return const <Note>[];
+    }
+  }
+
+  Future<bool> sendAiReply({
+    required int noteId,
+    required String body,
+  }) async {
+    final text = body.trim();
+    if (noteId <= 0 || text.isEmpty) return false;
+
+    final url = await baseUrl;
+    if (url.isEmpty) return false;
+
+    try {
+      final r = await http
+          .post(
+            Uri.parse('$url/api/whatsapp/replies/$noteId'),
+            headers: await _headers(),
+            body: jsonEncode({'body': text}),
+          )
+          .timeout(const Duration(seconds: 30));
+      return r.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<Map<String, dynamic>?> comboStatus() async {
     final url = await baseUrl;
     if (url.isEmpty) return null;

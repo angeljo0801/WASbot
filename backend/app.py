@@ -82,6 +82,12 @@ def init_db() -> None:
                 media_path TEXT,
                 sender TEXT,
                 message_sid TEXT UNIQUE,
+                reply_status TEXT NOT NULL DEFAULT 'none',
+                reply_text TEXT NOT NULL DEFAULT '',
+                reply_error TEXT NOT NULL DEFAULT '',
+                reply_attempts INTEGER NOT NULL DEFAULT 0,
+                reply_updated_at TEXT,
+                replied_at TEXT,
                 created_at TEXT NOT NULL
             );
 
@@ -121,6 +127,24 @@ def init_db() -> None:
             );
             """
         )
+        note_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(notes)").fetchall()
+        }
+        note_migrations = {
+            "reply_status": "TEXT NOT NULL DEFAULT 'none'",
+            "reply_text": "TEXT NOT NULL DEFAULT ''",
+            "reply_error": "TEXT NOT NULL DEFAULT ''",
+            "reply_attempts": "INTEGER NOT NULL DEFAULT 0",
+            "reply_updated_at": "TEXT",
+            "replied_at": "TEXT",
+        }
+        for column, definition in note_migrations.items():
+            if column not in note_columns:
+                conn.execute(
+                    f"ALTER TABLE notes ADD COLUMN {column} {definition}"
+                )
+
         defaults = {
             "processing_mode": "local",
             "whatsapp_provider": "twilio",
@@ -185,8 +209,10 @@ def get_config(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
             "remittance_agents": remittance_agents,
             "whatsapp_connected": bool(
                 TWILIO_ACCOUNT_SID
-                and TWILIO_API_KEY_SID
-                and TWILIO_API_SECRET
+                and (
+                    (TWILIO_API_KEY_SID and TWILIO_API_SECRET)
+                    or TWILIO_AUTH_TOKEN
+                )
                 and (raw.get("bot_number") or TWILIO_WHATSAPP_FROM)
             ),
         }
@@ -209,21 +235,36 @@ def note_row(row: sqlite3.Row) -> dict[str, Any]:
         "ai_source": row["ai_source"],
         "ai_provider": row["ai_source"],
         "media_path": row["media_path"],
+        "sender": row["sender"] or "",
+        "message_sid": row["message_sid"] or "",
+        "reply_status": row["reply_status"] or "none",
+        "reply_text": row["reply_text"] or "",
+        "reply_error": row["reply_error"] or "",
+        "reply_attempts": int(row["reply_attempts"] or 0),
+        "reply_updated_at": row["reply_updated_at"],
+        "replied_at": row["replied_at"],
         "created_at": row["created_at"],
     }
 
 
 def twilio_client() -> Client:
-    if not (TWILIO_ACCOUNT_SID and TWILIO_API_KEY_SID and TWILIO_API_SECRET):
-        raise HTTPException(status_code=503, detail="Twilio credentials are not configured")
-    return Client(
-        TWILIO_API_KEY_SID,
-        TWILIO_API_SECRET,
-        TWILIO_ACCOUNT_SID,
+    if not TWILIO_ACCOUNT_SID:
+        raise HTTPException(status_code=503, detail="Twilio Account SID is not configured")
+    if TWILIO_API_KEY_SID and TWILIO_API_SECRET:
+        return Client(
+            TWILIO_API_KEY_SID,
+            TWILIO_API_SECRET,
+            TWILIO_ACCOUNT_SID,
+        )
+    if TWILIO_AUTH_TOKEN:
+        return Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    raise HTTPException(
+        status_code=503,
+        detail="Twilio API key or Auth Token is not configured",
     )
 
 
-def send_whatsapp_direct(to_number: str, body: str) -> None:
+def send_whatsapp_direct(to_number: str, body: str) -> dict[str, str]:
     config = get_config()
     from_number = normalize_phone(config.get("bot_number") or TWILIO_WHATSAPP_FROM)
     to_number = normalize_phone(to_number)
@@ -240,6 +281,10 @@ def send_whatsapp_direct(to_number: str, body: str) -> None:
         f"sid_tail={str(getattr(msg, 'sid', ''))[-6:]} "
         f"to=***{to_number[-4:]} status={getattr(msg, 'status', '')}"
     )
+    return {
+        "sid": str(getattr(msg, "sid", "") or ""),
+        "status": str(getattr(msg, "status", "") or ""),
+    }
 
 
 @app.post("/webhooks/twilio/status")
@@ -614,6 +659,10 @@ class SendMessage(BaseModel):
     body: str
 
 
+class AiReplyRequest(BaseModel):
+    body: str
+
+
 class ClientSyncCreate(BaseModel):
     external_id: str
     name: str
@@ -648,7 +697,11 @@ def health() -> dict[str, Any]:
         "ok": True,
         "service": "WhatsBot",
         "twilio_configured": bool(
-            TWILIO_ACCOUNT_SID and TWILIO_API_KEY_SID and TWILIO_API_SECRET
+            TWILIO_ACCOUNT_SID
+            and (
+                (TWILIO_API_KEY_SID and TWILIO_API_SECRET)
+                or TWILIO_AUTH_TOKEN
+            )
         ),
     }
 
@@ -1084,6 +1137,125 @@ def send_whatsapp(payload: SendMessage) -> dict[str, Any]:
     return {"ok": True, "sid": msg.sid, "status": msg.status}
 
 
+@app.get(
+    "/api/whatsapp/replies/pending",
+    dependencies=[Depends(require_api_key)],
+)
+def pending_ai_replies(limit: int = 10) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit or 10), 20))
+    with closing(db()) as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM notes
+            WHERE source = 'whatsapp'
+              AND message_type = 'text'
+              AND sender IS NOT NULL
+              AND sender != ''
+              AND (
+                    reply_status = 'pending'
+                    OR (reply_status = 'failed' AND reply_attempts < 3)
+                  )
+            ORDER BY datetime(created_at) ASC, id ASC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+        return [note_row(row) for row in rows]
+
+
+@app.post(
+    "/api/whatsapp/replies/{note_id}",
+    dependencies=[Depends(require_api_key)],
+)
+def send_ai_reply(note_id: int, payload: AiReplyRequest) -> dict[str, Any]:
+    body = payload.body.strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="Reply body is empty")
+
+    with closing(db()) as conn:
+        row = conn.execute(
+            "SELECT * FROM notes WHERE id = ?",
+            (note_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Note not found")
+        if row["source"] != "whatsapp" or not normalize_phone(row["sender"]):
+            raise HTTPException(
+                status_code=400,
+                detail="Note is not an inbound WhatsApp message",
+            )
+        if (row["reply_status"] or "") == "sent":
+            return {
+                "ok": True,
+                "already_sent": True,
+                "reply_status": "sent",
+                "replied_at": row["replied_at"],
+            }
+        if (row["reply_status"] or "") == "sending":
+            raise HTTPException(status_code=409, detail="Reply is already being sent")
+
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE notes
+            SET reply_status = 'sending',
+                reply_error = '',
+                reply_attempts = COALESCE(reply_attempts, 0) + 1,
+                reply_updated_at = ?
+            WHERE id = ?
+            """,
+            (now, note_id),
+        )
+        conn.commit()
+        sender = normalize_phone(row["sender"])
+
+    try:
+        sent = send_whatsapp_direct(sender, body)
+    except Exception as exc:
+        with closing(db()) as conn:
+            conn.execute(
+                """
+                UPDATE notes
+                SET reply_status = 'failed',
+                    reply_error = ?,
+                    reply_updated_at = ?
+                WHERE id = ?
+                """,
+                (str(exc)[:500], utc_now(), note_id),
+            )
+            conn.commit()
+        raise HTTPException(
+            status_code=502,
+            detail="Twilio could not send the WhatsApp reply",
+        ) from exc
+
+    replied_at = utc_now()
+    with closing(db()) as conn:
+        conn.execute(
+            """
+            UPDATE notes
+            SET reply_status = 'sent',
+                reply_text = ?,
+                reply_error = '',
+                reply_updated_at = ?,
+                replied_at = ?
+            WHERE id = ?
+            """,
+            (body, replied_at, replied_at, note_id),
+        )
+        conn.commit()
+
+    return {
+        "ok": True,
+        "already_sent": False,
+        "sid": sent.get("sid", ""),
+        "status": sent.get("status", ""),
+        "reply_status": "sent",
+        "replied_at": replied_at,
+    }
+
+
 @app.post("/webhooks/twilio/whatsapp")
 async def twilio_whatsapp_webhook(request: Request) -> Response:
     form = await request.form()
@@ -1277,13 +1449,13 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
             if existing:
                 return Response(content=str(MessagingResponse()), media_type="application/xml")
 
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT INTO notes(
                 title, content, original_text, category, tags, source,
                 message_type, status, ai_source, media_path, sender,
-                message_sid, created_at
-            ) VALUES (?, ?, ?, 'Inbox', '[]', 'whatsapp', ?, 'new', 'rules', ?, ?, ?, ?)
+                message_sid, reply_status, created_at
+            ) VALUES (?, ?, ?, 'Inbox', '[]', 'whatsapp', ?, 'new', 'rules', ?, ?, ?, ?, ?)
             """,
             (
                 title,
@@ -1293,6 +1465,7 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
                 persisted_media,
                 sender,
                 message_sid,
+                "pending" if body and media_type == "text" else "none",
                 utc_now(),
             ),
         )

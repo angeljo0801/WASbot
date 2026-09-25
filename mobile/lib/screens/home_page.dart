@@ -58,8 +58,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final Set<int> selectedNoteIds = <int>{};
   bool shareWorking = false;
   Timer? _backgroundTimer;
+  Timer? _replyTimer;
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
   bool _backgroundTickRunning = false;
+  bool _replyTickRunning = false;
   final remittanceSms = RemittanceSmsService();
 
   @override
@@ -80,6 +82,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           unawaited(_backgroundTick());
         }
       },
+    );
+    _replyTimer = Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => unawaited(_processPendingReplies()),
     );
     refresh();
   }
@@ -131,6 +137,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _backgroundTimer?.cancel();
+    _replyTimer?.cancel();
     search.dispose();
     unawaited(localAi.dispose());
     unawaited(embeddings.dispose());
@@ -173,6 +180,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _runPostRefreshIntelligence() async {
     await _repairContactCategories();
+    await _processPendingReplies();
     await _processPendingAi();
     await _processKnowledge();
   }
@@ -248,8 +256,50 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _processPendingReplies() async {
+    if (_replyTickRunning || aiRunning) return;
+
+    final settings = await ai.settings();
+    if (!settings.autoProcess || settings.provider == AiProvider.rules) return;
+    if (settings.provider == AiProvider.device &&
+        settings.deviceModelPath.trim().isEmpty) {
+      return;
+    }
+
+    _replyTickRunning = true;
+    try {
+      final pending = await api.pendingWhatsAppReplies(limit: 5);
+      if (pending.isEmpty) return;
+
+      for (final note in pending) {
+        if (note.sender.trim().isEmpty ||
+            note.messageType != 'text' ||
+            note.replyStatus == 'sent') {
+          continue;
+        }
+
+        final reply = await ai.replyToWhatsapp(note);
+        if (reply.trim().isEmpty) continue;
+
+        final sent = await api.sendAiReply(
+          noteId: note.id,
+          body: reply,
+        );
+        if (!sent) {
+          // Avoid hammering Twilio if the current send path is unavailable.
+          break;
+        }
+      }
+    } catch (_) {
+      // Keep the backend item pending. A later foreground/background tick
+      // retries after the model or Local AI Manager becomes available again.
+    } finally {
+      _replyTickRunning = false;
+    }
+  }
+
   Future<void> _processPendingAi({bool force = false}) async {
-    if (aiRunning) return;
+    if (aiRunning || _replyTickRunning) return;
     final settings = await ai.settings();
     if (settings.provider == AiProvider.rules) return;
     if (!settings.autoProcess && !force) return;
