@@ -310,6 +310,21 @@ class AiProviderService {
       }
     }
     if (data is! Map || data['is_correction'] != true) return null;
+    const allowedFields = {
+      'customerName',
+      'total',
+      'store',
+      'orderNumber',
+      'description',
+      'remittanceDate',
+      'remittanceSource',
+    };
+    final field = (data['field'] ?? '').toString();
+    final target = (data['target_type'] ?? '').toString();
+    if (!allowedFields.contains(field) ||
+        (target != 'purchase' && target != 'remittance')) {
+      return null;
+    }
     final correction = OcrNaturalCorrection.fromJson(
       Map<String, dynamic>.from(data),
     );
