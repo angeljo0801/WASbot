@@ -131,9 +131,10 @@ class KnowledgePipeline {
         KnowledgePipelineProgress(done, candidates.length, note.title),
       );
 
+      OcrPurchaseResult? imageResult;
       if (note.messageType == 'image') {
         try {
-          await ocr.processImage(note);
+          imageResult = await ocr.processImage(note);
         } catch (_) {}
       }
 
@@ -148,29 +149,42 @@ class KnowledgePipeline {
         } catch (_) {}
       }
 
-      if (note.messageType == 'contact') {
+      if (note.messageType == 'image') {
+        // OCR images use only structured purchase fields as entities.
+        // Never feed the full OCR text into generic entity extraction.
         try {
-          await _linkContactEntity(note);
+          final draft = await store.draftForNote(key) ?? imageResult?.draft;
+          if (draft != null) {
+            await store.syncOcrKeyEntities(draft);
+          } else {
+            await store.clearOcrEntityLinks(key);
+          }
         } catch (_) {}
-      }
+      } else {
+        if (note.messageType == 'contact') {
+          try {
+            await _linkContactEntity(note);
+          } catch (_) {}
+        }
 
-      if (note.customerName.trim().isNotEmpty) {
+        if (note.customerName.trim().isNotEmpty) {
+          try {
+            final entity = await store.upsertEntity(
+              note.customerName,
+              type: 'cliente',
+            );
+            await store.linkEntity(entity.id, key, relation: 'cliente');
+          } catch (_) {}
+        }
+
         try {
-          final entity = await store.upsertEntity(
-            note.customerName,
-            type: 'cliente',
-          );
-          await store.linkEntity(entity.id, key, relation: 'cliente');
+          await _linkKnownEntities(note, '');
         } catch (_) {}
+        await _extractAndLinkEntities(note);
       }
 
       final state = await store.noteState(key);
       final ocrText = (state?['ocr_text'] ?? '').toString();
-      try {
-        await _linkKnownEntities(note, ocrText);
-      } catch (_) {}
-      await _extractAndLinkEntities(note);
-
       try {
         await embeddings.indexNote(note, ocrText: ocrText);
       } catch (_) {}

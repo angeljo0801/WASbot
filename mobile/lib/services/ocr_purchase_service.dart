@@ -353,6 +353,7 @@ class OcrPurchaseService {
     );
 
     await store.saveDraft(draft);
+    await store.syncOcrKeyEntities(draft);
     await store.saveNoteState(
       key,
       ocrProcessed: true,
@@ -488,6 +489,7 @@ class OcrPurchaseService {
       warnings: warnings,
     );
     await store.saveDraft(updated);
+    await store.syncOcrKeyEntities(updated);
 
     if (!ambiguous) {
       final entity = await store.upsertEntity(
