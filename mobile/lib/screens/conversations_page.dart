@@ -200,7 +200,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
       body: RefreshIndicator(
         onRefresh: _load,
         child: loading
-            ? const ListView(
+            ? ListView(
                 children: [
                   SizedBox(height: 180),
                   Center(child: CircularProgressIndicator()),
