@@ -13,10 +13,12 @@ class RemittanceSmsService {
     }
   }
 
-  Future<void> requestPermission() async {
+  Future<bool> requestPermission() async {
     try {
-      await _channel.invokeMethod('requestPermission');
-    } catch (_) {}
+      return await _channel.invokeMethod<bool>('requestPermission') ?? false;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<int> syncPending(ApiService api) async {
