@@ -900,13 +900,7 @@ def list_notes(q: str = "", category: str = "") -> list[dict[str, Any]]:
 
     with closing(db()) as conn:
         rows = conn.execute(sql, params).fetchall()
-        result = []
-        for row in rows:
-            item = note_row(row)
-            item["conversation_context"] = conversation_context(row["sender"])
-            item["business_context"] = business_context_for_sender(row["sender"])
-            result.append(item)
-        return result
+        return [note_row(row) for row in rows]
 
 
 @app.post("/api/notes", status_code=201, dependencies=[Depends(require_api_key)])
@@ -1289,7 +1283,13 @@ def pending_ai_replies(limit: int = 10) -> list[dict[str, Any]]:
             """,
             (safe_limit,),
         ).fetchall()
-        return [note_row(row) for row in rows]
+        result = []
+        for row in rows:
+            item = note_row(row)
+            item["conversation_context"] = conversation_context(row["sender"])
+            item["business_context"] = business_context_for_sender(row["sender"])
+            result.append(item)
+        return result
 
 
 @app.post(
