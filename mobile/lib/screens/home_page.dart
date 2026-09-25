@@ -12,6 +12,7 @@ import '../services/embedding_service.dart';
 import '../services/knowledge_pipeline.dart';
 import '../services/knowledge_store.dart';
 import '../services/note_share_service.dart';
+import '../services/remittance_sms_service.dart';
 import 'ai_settings_page.dart';
 import 'combo_page.dart';
 import 'draft_review_page.dart';
@@ -37,7 +38,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final search = TextEditingController();
   final categories = const [
     'Todas', 'Inbox', 'Clientes', 'Trabajo', 'Personal', 'Compras', 'Gastos',
-    'Ideas', 'Documentos', 'Recordatorios', 'Fotos'
+    'Ideas', 'Documentos', 'Recordatorios', 'Fotos', 'Remesas'
   ];
 
   String category = 'Todas';
@@ -59,6 +60,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Timer? _backgroundTimer;
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
   bool _backgroundTickRunning = false;
+  final remittanceSms = RemittanceSmsService();
 
   @override
   void initState() {
@@ -105,6 +107,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       final sync = PaqueteriaPurchaseSyncService(api);
       await sync.flush();
+      await remittanceSms.syncPending(api);
 
       final latest = await api.getNotes();
       notes = latest;
@@ -147,6 +150,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (mounted) setState(() => loading = false);
     }
     if (error == null) {
+      await remittanceSms.syncPending(api);
       final sync = PaqueteriaPurchaseSyncService(api);
       unawaited(() async {
         await sync.flush();
@@ -413,6 +417,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         'audio' => Icons.mic_none,
         'document' => Icons.description_outlined,
         'contact' => Icons.person_add_alt_1_outlined,
+        'remittance' => Icons.payments_outlined,
         _ => Icons.notes_outlined,
       };
 
