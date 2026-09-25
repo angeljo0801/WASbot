@@ -766,6 +766,14 @@ class OcrPurchaseService {
     final recognizedPurchase = parsed.total > 0 ||
         parsed.items.isNotEmpty ||
         parsed.store != 'Otra tienda';
+    if (recognizedPurchase) {
+      await photoStorage.archiveClassifiedNote(
+        note,
+        api,
+        kind: PhotoFolderKind.purchases,
+        localPath: path,
+      );
+    }
     if (text.isNotEmpty) {
       final current = note.content.trim();
       final placeholder = current.isEmpty ||
