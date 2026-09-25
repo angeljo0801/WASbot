@@ -558,12 +558,12 @@ class _KnowledgeChatPageState extends State<KnowledgeChatPage> {
             break;
           }
         }
-        target ??= selected.first;
+        final targetNote = target ?? selected.first;
         try {
           final draft = await OcrPurchaseService(api: widget.api)
-              .createDraftFromCombinedNote(target);
+              .createDraftFromCombinedNote(targetNote);
           localActionAnswer =
-              'Borrador de compra creado con los datos de “${target.title}”. '
+              'Borrador de compra creado con los datos de “${targetNote.title}”. '
               'Tiene ${draft.attachmentPaths.length} imagen(es) adjunta(s) para revisar.';
         } catch (_) {
           localActionAnswer =
