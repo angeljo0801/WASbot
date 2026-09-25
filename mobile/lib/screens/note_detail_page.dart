@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:open_filex/open_filex.dart';
@@ -12,6 +13,7 @@ import '../services/knowledge_store.dart';
 import '../services/note_share_service.dart';
 import '../services/ocr_purchase_service.dart';
 import 'draft_review_page.dart';
+import 'fullscreen_image_viewer.dart';
 
 class NoteDetailPage extends StatefulWidget {
   final Note note;
@@ -220,6 +222,30 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
     } finally {
       if (mounted) setState(() => working = false);
     }
+  }
+
+  Future<void> _openLocalPhoto(String path) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FullscreenImageViewer.file(
+          title: 'Foto',
+          path: path,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openMemoryPhoto(Uint8List bytes) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FullscreenImageViewer.memory(
+          title: 'Foto',
+          bytes: bytes,
+        ),
+      ),
+    );
   }
 
   Future<void> combine() async {
@@ -519,11 +545,48 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
                 height: 280,
                 child: PageView.builder(
                   itemCount: localPhotos.length,
-                  itemBuilder: (_, index) => ClipRRect(
+                  itemBuilder: (_, index) => InkWell(
                     borderRadius: BorderRadius.circular(16),
-                    child: Image.file(
-                      File(localPhotos[index]),
-                      fit: BoxFit.contain,
+                    onTap: () => _openLocalPhoto(localPhotos[index]),
+                    child: Stack(
+                      alignment: Alignment.bottomCenter,
+                      children: [
+                        Positioned.fill(
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(16),
+                            child: Image.file(
+                              File(localPhotos[index]),
+                              fit: BoxFit.contain,
+                            ),
+                          ),
+                        ),
+                        Container(
+                          margin: const EdgeInsets.only(bottom: 10),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 7,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.68),
+                            borderRadius: BorderRadius.circular(18),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.zoom_in_outlined,
+                                color: Colors.white,
+                                size: 18,
+                              ),
+                              SizedBox(width: 6),
+                              Text(
+                                'Toca para ampliar',
+                                style: TextStyle(color: Colors.white),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -544,9 +607,47 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
                   if (bytes == null || bytes.isEmpty) {
                     return const Text('No se pudo cargar la imagen.');
                   }
-                  return ClipRRect(
+                  return InkWell(
                     borderRadius: BorderRadius.circular(16),
-                    child: Image.memory(bytes, fit: BoxFit.contain),
+                    onTap: () => _openMemoryPhoto(bytes),
+                    child: Stack(
+                      alignment: Alignment.bottomCenter,
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(16),
+                          child: Image.memory(
+                            bytes,
+                            fit: BoxFit.contain,
+                          ),
+                        ),
+                        Container(
+                          margin: const EdgeInsets.only(bottom: 10),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 7,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.68),
+                            borderRadius: BorderRadius.circular(18),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.zoom_in_outlined,
+                                color: Colors.white,
+                                size: 18,
+                              ),
+                              SizedBox(width: 6),
+                              Text(
+                                'Toca para ampliar',
+                                style: TextStyle(color: Colors.white),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
                   );
                 },
               ),
