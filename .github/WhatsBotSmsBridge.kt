@@ -11,6 +11,7 @@ import org.json.JSONArray
 object WhatsBotSmsBridge {
     private const val CHANNEL = "whatsbot/sms"
     private const val REQUEST_SMS_PERMISSION = 8421
+    private var pendingPermissionResult: MethodChannel.Result? = null
 
     fun register(activity: Activity, messenger: BinaryMessenger) {
         MethodChannel(messenger, CHANNEL).setMethodCallHandler { call, result ->
@@ -27,11 +28,11 @@ object WhatsBotSmsBridge {
                     ) {
                         result.success(true)
                     } else {
+                        pendingPermissionResult = result
                         activity.requestPermissions(
                             arrayOf(Manifest.permission.RECEIVE_SMS),
                             REQUEST_SMS_PERMISSION,
                         )
-                        result.success(true)
                     }
                 }
                 "pending" -> result.success(readPending(activity))
@@ -46,6 +47,18 @@ object WhatsBotSmsBridge {
                 else -> result.notImplemented()
             }
         }
+    }
+
+    fun onRequestPermissionsResult(
+        requestCode: Int,
+        grantResults: IntArray,
+    ): Boolean {
+        if (requestCode != REQUEST_SMS_PERMISSION) return false
+        val granted = grantResults.isNotEmpty() &&
+            grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+        pendingPermissionResult?.success(granted)
+        pendingPermissionResult = null
+        return true
     }
 
     private fun readPending(context: Context): List<Map<String, Any>> {
