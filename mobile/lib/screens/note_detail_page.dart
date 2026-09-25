@@ -350,6 +350,11 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
     final candidates = all.where((n) => n.id != note.id).take(60).toList();
     if (!mounted || candidates.isEmpty) return;
     final selected = <int>{};
+    final previewFutures = <int, Future<String?>>{
+      for (final candidate in candidates)
+        if (candidate.messageType == 'image')
+          candidate.id: _materializeCombinedImage(candidate),
+    };
     final ok = await showDialog<bool>(
           context: context,
           builder: (context) => StatefulBuilder(
@@ -363,12 +368,58 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
                       .map(
                         (other) => CheckboxListTile(
                           value: selected.contains(other.id),
-                          secondary: CircleAvatar(
-                            child: Icon(
-                              _noteTypeIcon(other),
-                              size: 20,
-                            ),
-                          ),
+                          secondary: other.messageType == 'image'
+                              ? FutureBuilder<String?>(
+                                  future: previewFutures[other.id],
+                                  builder: (context, snapshot) {
+                                    final path = snapshot.data;
+                                    if (path != null &&
+                                        path.isNotEmpty &&
+                                        File(path).existsSync()) {
+                                      return ClipRRect(
+                                        borderRadius: BorderRadius.circular(10),
+                                        child: SizedBox(
+                                          width: 68,
+                                          height: 68,
+                                          child: Image.file(
+                                            File(path),
+                                            fit: BoxFit.cover,
+                                            errorBuilder: (_, __, ___) =>
+                                                const CircleAvatar(
+                                              child: Icon(
+                                                Icons.broken_image_outlined,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      );
+                                    }
+                                    if (snapshot.connectionState ==
+                                        ConnectionState.waiting) {
+                                      return const SizedBox(
+                                        width: 68,
+                                        height: 68,
+                                        child: Center(
+                                          child: SizedBox.square(
+                                            dimension: 22,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          ),
+                                        ),
+                                      );
+                                    }
+                                    return const CircleAvatar(
+                                      child: Icon(Icons.image_outlined),
+                                    );
+                                  },
+                                )
+                              : CircleAvatar(
+                                  child: Icon(
+                                    _noteTypeIcon(other),
+                                    size: 20,
+                                  ),
+                                ),
                           title: Text(other.title),
                           subtitle: Text(
                             other.content.replaceAll('\n', ' '),
