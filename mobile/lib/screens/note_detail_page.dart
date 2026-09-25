@@ -363,7 +363,12 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
                       .map(
                         (other) => CheckboxListTile(
                           value: selected.contains(other.id),
-                          secondary: Icon(_noteTypeIcon(other)),
+                          secondary: CircleAvatar(
+                            child: Icon(
+                              _noteTypeIcon(other),
+                              size: 20,
+                            ),
+                          ),
                           title: Text(other.title),
                           subtitle: Text(
                             other.content.replaceAll('\n', ' '),
