@@ -9,6 +9,8 @@ on:
       - '.github/WhatsBotBackupStorageBridge.kt'
       - '.github/WhatsBotLocalAiManagerBridge.kt'
       - '.github/WhatsBotMainActivity.kt'
+      - '.github/WhatsBotSmsReceiver.kt'
+      - '.github/WhatsBotSmsBridge.kt'
       - '.github/workflows/build-apk.yml'
 
 permissions:
@@ -60,6 +62,8 @@ jobs:
           cp ../.github/WhatsBotBackupStorageBridge.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotBackupStorageBridge.kt
           cp ../.github/WhatsBotLocalAiManagerBridge.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/LocalAiManagerBridge.kt
           cp ../.github/WhatsBotMainActivity.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/MainActivity.kt
+          cp ../.github/WhatsBotSmsReceiver.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotSmsReceiver.kt
+          cp ../.github/WhatsBotSmsBridge.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotSmsBridge.kt
 
           normalize_secret() {
             local name="$1"
@@ -139,6 +143,7 @@ jobs:
               'android.permission.WAKE_LOCK',
               'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
               'android.permission.POST_NOTIFICATIONS',
+              'android.permission.RECEIVE_SMS',
           ]
           for permission in background_permissions:
               if permission not in x:
@@ -176,6 +181,17 @@ jobs:
               </service>
           '''
               x = x.replace('    </application>', service + '    </application>', 1)
+          if 'WhatsBotSmsReceiver' not in x:
+              receiver = '''        <receiver
+                  android:name=".WhatsBotSmsReceiver"
+                  android:permission="android.permission.BROADCAST_SMS"
+                  android:exported="true">
+                  <intent-filter android:priority="999">
+                      <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+                  </intent-filter>
+              </receiver>
+          '''
+              x = x.replace('    </application>', receiver + '    </application>', 1)
           manifest.write_text(x)
           PY
 
