@@ -603,7 +603,9 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
       await PhotoStorageService.instance.finalizePurchasePhotos(
         draft.attachmentPaths.isNotEmpty
             ? draft.attachmentPaths
-            : (draft.mediaPath.isEmpty ? const <String>[] : <String>[draft.mediaPath]),
+            : (draft.mediaPath.isEmpty
+                ? const <String>[]
+                : <String>[draft.mediaPath]),
         customerName:
             draft.customerName.trim().isEmpty ? 'Cliente' : draft.customerName,
         orderNumber: draft.orderNumber,
@@ -611,7 +613,7 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
       );
 
       final sync = PaqueteriaPurchaseSyncService(widget.api);
-      await sync.enqueue(
+      final share = await sync.enqueue(
         externalId: 'whatsbot-draft-${draft.id}',
         customerName: draft.customerName,
         customerPhone: draft.customerPhone,
@@ -637,6 +639,62 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
           'source': 'WhatsBot automatic OCR',
         },
         createdAt: draft.createdAt,
+      );
+
+      if (!share.uploaded) {
+        await store.saveDraft(
+          draft.copyWith(
+            status: 'confirmed_pending_sync',
+            updatedAt: DateTime.now(),
+          ),
+        );
+        if (!mounted) return;
+        await showDialog<void>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Pendiente de compartir'),
+            content: Text(
+              share.message +
+                  '\n\nLa compra quedó guardada y WhatsBot volverá a intentarlo automáticamente.',
+            ),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Entendido'),
+              ),
+            ],
+          ),
+        );
+        return;
+      }
+
+      await store.saveDraft(
+        draft.copyWith(
+          status: 'confirmed',
+          updatedAt: DateTime.now(),
+        ),
+      );
+      final combo = await widget.api.comboStatus();
+      final lastPaqueteriaSync =
+          (combo?['snapshot_updated_at'] ?? '').toString().trim();
+
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Compartido con Paquetería'),
+          content: Text(
+            lastPaqueteriaSync.isEmpty
+                ? 'La compra llegó correctamente al puente de Paquetería. La app la importará en su próxima sincronización.'
+                : 'La compra llegó correctamente al puente de Paquetería. Última sincronización detectada: $lastPaqueteriaSync.',
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cerrar'),
+            ),
+          ],
+        ),
       );
       if (!mounted) return;
       Navigator.pop(context, true);
@@ -998,7 +1056,7 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
                     )
                   : const Icon(Icons.check_circle_outline),
               label: Text(
-                saving ? 'Enviando…' : 'Confirmar y enviar a Paquetería',
+                saving ? 'Compartiendo…' : 'Confirmar y compartir con Paquetería',
               ),
             ),
             TextButton(
