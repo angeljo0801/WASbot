@@ -6,6 +6,7 @@ import '../models/purchase_draft.dart';
 import '../services/api_service.dart';
 import '../services/knowledge_store.dart';
 import '../services/paqueteria_purchase_sync_service.dart';
+import 'fullscreen_image_viewer.dart';
 
 class DraftReviewPage extends StatefulWidget {
   final PurchaseDraft draft;
@@ -411,6 +412,18 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
     if (mounted) Navigator.pop(context, true);
   }
 
+  Future<void> _openOcrImage(String path) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FullscreenImageViewer.file(
+          title: 'Foto del OCR',
+          path: path,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final d = widget.draft;
@@ -432,12 +445,54 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
             ),
             if (d.mediaPath.isNotEmpty && File(d.mediaPath).existsSync()) ...[
               const SizedBox(height: 10),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(14),
-                child: Image.file(
-                  File(d.mediaPath),
-                  height: 220,
-                  fit: BoxFit.contain,
+              Semantics(
+                button: true,
+                label: 'Abrir foto del OCR a pantalla completa',
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(14),
+                  onTap: () => _openOcrImage(d.mediaPath),
+                  child: Stack(
+                    alignment: Alignment.bottomCenter,
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(14),
+                        child: SizedBox(
+                          width: double.infinity,
+                          height: 240,
+                          child: Image.file(
+                            File(d.mediaPath),
+                            fit: BoxFit.contain,
+                          ),
+                        ),
+                      ),
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 7,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.68),
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.zoom_in_outlined,
+                              color: Colors.white,
+                              size: 18,
+                            ),
+                            SizedBox(width: 6),
+                            Text(
+                              'Toca para ampliar',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ],
