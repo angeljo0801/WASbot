@@ -143,6 +143,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       error = null;
     });
     try {
+      await remittanceSms.syncPending(api);
       notes = await api.getNotes(query: search.text, category: category);
     } catch (e) {
       error = 'Configura el servidor para comenzar. $e';
@@ -150,7 +151,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (mounted) setState(() => loading = false);
     }
     if (error == null) {
-      await remittanceSms.syncPending(api);
       final sync = PaqueteriaPurchaseSyncService(api);
       unawaited(() async {
         await sync.flush();
