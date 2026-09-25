@@ -626,14 +626,14 @@ class OcrPurchaseService {
     final key = KnowledgeStore.noteKey(note);
     final existing = await store.draftForNote(key);
     if (!force && await store.isOcrProcessed(key) && existing != null) {
-      if (existing.draftType == 'remittance') {
-        await photoStorage.archiveClassifiedNote(
-          note,
-          api,
-          kind: PhotoFolderKind.remittances,
-          localPath: existing.mediaPath,
-        );
-      }
+      await photoStorage.archiveClassifiedNote(
+        note,
+        api,
+        kind: existing.draftType == 'remittance'
+            ? PhotoFolderKind.remittances
+            : PhotoFolderKind.purchases,
+        localPath: existing.mediaPath,
+      );
       return OcrPurchaseResult(
         draft: existing,
         ocrText: existing.ocrText,
