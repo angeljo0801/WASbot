@@ -430,7 +430,9 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
 
     setState(() => saving = true);
     try {
-      final draft = _current(status: 'confirmed');
+      final draft = _current(status: 'confirmed').copyWith(
+        attachmentPaths: _attachmentPaths,
+      );
 
       Future<void> learn(
         String field,
@@ -468,6 +470,16 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
       await store.saveDraft(draft);
       await store.syncOcrKeyEntities(draft);
 
+      await PhotoStorageService.instance.finalizePurchasePhotos(
+        draft.attachmentPaths.isNotEmpty
+            ? draft.attachmentPaths
+            : (draft.mediaPath.isEmpty ? const <String>[] : <String>[draft.mediaPath]),
+        customerName:
+            draft.customerName.trim().isEmpty ? 'Cliente' : draft.customerName,
+        orderNumber: draft.orderNumber,
+        draftId: draft.id,
+      );
+
       final sync = PaqueteriaPurchaseSyncService(widget.api);
       await sync.enqueue(
         externalId: 'whatsbot-draft-${draft.id}',
@@ -475,8 +487,11 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
         customerPhone: draft.customerPhone,
         title: draft.store,
         description: draft.description,
-        photoPaths:
-            draft.mediaPath.isEmpty ? const [] : <String>[draft.mediaPath],
+        photoPaths: draft.attachmentPaths.isNotEmpty
+            ? draft.attachmentPaths
+            : (draft.mediaPath.isEmpty
+                ? const <String>[]
+                : <String>[draft.mediaPath]),
         store: draft.store,
         total: draft.total,
         orderNumber: draft.orderNumber,
