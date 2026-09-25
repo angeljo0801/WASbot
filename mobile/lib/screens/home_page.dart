@@ -17,6 +17,7 @@ import '../services/paypal_email_notification_service.dart';
 import 'ai_settings_page.dart';
 import 'combo_page.dart';
 import 'draft_review_page.dart';
+import 'remittance_draft_review_page.dart';
 import 'entities_page.dart';
 import 'knowledge_chat_page.dart';
 import 'new_note_page.dart';
@@ -606,18 +607,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     '$pendingDrafts borrador(es) OCR pendientes de confirmar',
                   ),
                   subtitle: const Text(
-                    'Revísalos antes de enviarlos a Paquetería.',
+                    'Revísalos antes de confirmar compras o remesas.',
                   ),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () async {
                     final drafts = await KnowledgeStore.instance
                         .drafts(status: 'pending');
                     if (!mounted || drafts.isEmpty) return;
+                    final first = drafts.first;
                     await Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (_) =>
-                            DraftReviewPage(draft: drafts.first, api: api),
+                        builder: (_) => first.draftType == 'remittance'
+                            ? RemittanceDraftReviewPage(
+                                draft: first,
+                                api: api,
+                              )
+                            : DraftReviewPage(
+                                draft: first,
+                                api: api,
+                              ),
                       ),
                     );
                     if (mounted) {
