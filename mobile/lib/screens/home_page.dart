@@ -339,6 +339,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       for (final note in candidates) {
         try {
+          if (note.category == 'Remesas' || note.messageType == 'remittance') {
+            await api.updateNoteFromAi(
+              id: note.id,
+              title: note.title,
+              content: note.content,
+              category: 'Remesas',
+              tags: note.tags,
+              aiProvider: sourceId,
+            );
+            continue;
+          }
+
           if (note.messageType == 'contact') {
             final tags = <String>{
               ...note.tags,
