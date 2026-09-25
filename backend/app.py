@@ -314,6 +314,16 @@ async def twilio_message_status(request: Request) -> Response:
         f"status={status} error_code={error_code or '-'} "
         f"error={error_message[:160] if error_message else '-'}"
     )
+    log_activity(
+        "twilio_status",
+        status=status or "unknown",
+        sender=to_number,
+        detail={
+            "sid_tail": sid[-6:],
+            "error_code": error_code,
+            "error": error_message[:240],
+        },
+    )
     return Response(status_code=204)
 
 
