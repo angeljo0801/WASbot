@@ -87,7 +87,38 @@ class _RemittanceDraftReviewPageState
     setState(() => saving = true);
     try {
       final draft = _current(status: 'confirmed');
-      final ok = await widget.api.saveOcrRemittance(
+
+      Future<void> learn(
+        String field,
+        String original,
+        String corrected,
+      ) async {
+        if (original.trim().isEmpty ||
+            corrected.trim().isEmpty ||
+            original.trim() == corrected.trim()) {
+          return;
+        }
+        await widget.api.recordOcrCorrection(
+          source: widget.draft.remittanceSource,
+          field: field,
+          original: original,
+          corrected: corrected,
+        );
+      }
+
+      await learn('name', widget.draft.customerName, draft.customerName);
+      await learn(
+        'amount',
+        widget.draft.total > 0 ? widget.draft.total.toStringAsFixed(2) : '',
+        draft.total > 0 ? draft.total.toStringAsFixed(2) : '',
+      );
+      await learn(
+        'date',
+        widget.draft.remittanceDate,
+        draft.remittanceDate,
+      );
+
+      final result = await widget.api.saveOcrRemittance(
         noteId: _noteId(),
         source: draft.remittanceSource,
         name: draft.customerName,
@@ -95,10 +126,39 @@ class _RemittanceDraftReviewPageState
         date: draft.remittanceDate,
         ocrText: draft.ocrText,
       );
-      if (!ok) {
+      if (result.isEmpty) {
         throw Exception(
           'No se pudo confirmar la remesa en el servidor. El borrador sigue pendiente.',
         );
+      }
+
+      if (result['duplicate'] == true) {
+        final duplicateOf = result['duplicate_of'];
+        await store.saveDraft(draft.copyWith(status: 'discarded'));
+        await store.clearOcrEntityLinks(draft.noteKey);
+        if (mounted) {
+          await showDialog<void>(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('Remesa duplicada'),
+              content: Text(
+                duplicateOf == null
+                    ? 'WhatsBot detectó que esta remesa ya estaba registrada.'
+                    : 'WhatsBot detectó que coincide con la remesa #' +
+                        duplicateOf.toString() +
+                        '. No se creó otra remesa.',
+              ),
+              actions: [
+                FilledButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Entendido'),
+                ),
+              ],
+            ),
+          );
+          if (mounted) Navigator.pop(context, true);
+        }
+        return;
       }
 
       await store.saveDraft(draft);
