@@ -334,7 +334,13 @@ class KnowledgeStore {
     await clearOcrEntityLinks(draft.noteKey);
 
     final customer = draft.customerName.trim();
-    if (customer.isNotEmpty) {
+    final customerAmbiguous = draft.warnings.any((warning) {
+      final value = warning.toLowerCase();
+      return value.contains('ambigu') ||
+          value.contains('varios clientes') ||
+          value.contains('varias coincidencias');
+    });
+    if (customer.isNotEmpty && !customerAmbiguous) {
       final entity = await upsertEntity(
         customer,
         type: 'cliente',
