@@ -117,6 +117,13 @@ def set_agents(values: list[str]) -> list[str]:
     return agents
 
 
+def _new_code(previous: str = "") -> str:
+    code = previous
+    while code == previous:
+        code = f"{secrets.randbelow(90000) + 10000:05d}"
+    return code
+
+
 def _write_code(conn: sqlite3.Connection, code: str, day: str) -> None:
     for key, value in (("remittance_code", code), ("remittance_code_date", day)):
         conn.execute(
@@ -137,7 +144,7 @@ def ensure_daily_code() -> tuple[str, str]:
         code = values.get("remittance_code", "")
         code_date = values.get("remittance_code_date", "")
         if not re.fullmatch(r"\d{5}", code) or code_date != today:
-            code = f"{secrets.randbelow(90000) + 10000:05d}"
+            code = _new_code(code)
             _write_code(conn, code, today)
             conn.execute("DELETE FROM remittance_agent_sessions")
             conn.commit()
@@ -147,7 +154,11 @@ def ensure_daily_code() -> tuple[str, str]:
 def regenerate_code() -> tuple[str, str]:
     with closing(db()) as conn:
         today = remittance_day()
-        code = f"{secrets.randbelow(90000) + 10000:05d}"
+        row = conn.execute(
+            "SELECT value FROM config WHERE key = 'remittance_code'"
+        ).fetchone()
+        previous = row["value"] if row else ""
+        code = _new_code(previous)
         _write_code(conn, code, today)
         conn.execute("DELETE FROM remittance_agent_sessions")
         conn.commit()
