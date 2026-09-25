@@ -191,24 +191,30 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> enableRemittanceSms() async {
-    await remittanceSms.requestPermission();
-    await Future<void>.delayed(const Duration(milliseconds: 500));
-    final allowed = await remittanceSms.hasPermission();
+    final allowed = await remittanceSms.requestPermission();
     if (!mounted) return;
     setState(() => smsPermission = allowed);
-    if (allowed) {
-      final imported = await remittanceSms.syncPending(widget.api);
-      if (!mounted) return;
+    if (!allowed) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
+        const SnackBar(
           content: Text(
-            imported > 0
-                ? 'Permiso activado. Se registraron $imported remesa(s) pendiente(s).'
-                : 'Permiso de SMS activado para remesas de BofA.',
+            'Sin permiso de SMS, WhatsBot no puede registrar automáticamente las remesas de BofA.',
           ),
         ),
       );
+      return;
     }
+    final imported = await remittanceSms.syncPending(widget.api);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          imported > 0
+              ? 'Permiso activado. Se registraron $imported remesa(s) pendiente(s).'
+              : 'Permiso de SMS activado para remesas de BofA.',
+        ),
+      ),
+    );
   }
   Future<void> setBackgroundEnabled(bool value) async {
     if (backgroundBusy) return;
@@ -652,7 +658,7 @@ class _SettingsPageState extends State<SettingsPage> {
                           children: [
                             Row(
                               children: [
-                                const Icon(Icons.pin_outlined),
+                                const Icon(Icons.key_outlined),
                                 const SizedBox(width: 10),
                                 Expanded(
                                   child: Text(
@@ -776,7 +782,8 @@ class _SettingsPageState extends State<SettingsPage> {
                     ),
                     const SizedBox(height: 26),
                     FilledButton.icon(
-                      onPressed: saving ? null : save,                      icon: saving
+                      onPressed: saving ? null : save,
+                      icon: saving
                           ? const SizedBox.square(
                               dimension: 18,
                               child: CircularProgressIndicator(strokeWidth: 2),
