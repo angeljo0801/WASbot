@@ -1156,6 +1156,100 @@ class OcrPurchaseService {
     return updated;
   }
 
+  int _draftDataScore(PurchaseDraft draft) {
+    var score = 0;
+    if (draft.total > 0) score += 8;
+    if (draft.items.isNotEmpty) score += 4 + draft.items.length;
+    if (draft.orderNumber.trim().isNotEmpty) score += 4;
+    if (draft.store.trim().isNotEmpty && draft.store != 'Otra tienda') {
+      score += 3;
+    }
+    if (draft.description.trim().isNotEmpty) score += 2;
+    score += (draft.confidence * 5).round();
+    return score;
+  }
+
+  Future<PurchaseDraft?> _groupPurchaseBatch(
+    List<PurchaseDraft> drafts,
+    OcrNaturalCorrection correction,
+  ) async {
+    if (drafts.length < 2 ||
+        correction.field != OcrCorrectionField.customerName ||
+        !correction.targetsPurchases) {
+      return null;
+    }
+
+    final ordered = drafts.toList()
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
+    PurchaseDraft primary = ordered.first;
+    for (final draft in ordered.skip(1)) {
+      if (_draftDataScore(draft) > _draftDataScore(primary)) {
+        primary = draft;
+      }
+    }
+
+    final correctedPrimary = await _applyCorrectionToDraft(
+      primary,
+      correction,
+    );
+    if (correctedPrimary == null) return null;
+
+    final attachments = <String>[];
+    for (final draft in ordered) {
+      final paths = <String>[
+        ...draft.attachmentPaths,
+        if (draft.mediaPath.trim().isNotEmpty) draft.mediaPath.trim(),
+      ];
+      for (final path in paths) {
+        final clean = path.trim();
+        if (clean.isEmpty || attachments.contains(clean)) continue;
+        attachments.add(clean);
+      }
+    }
+
+    final warnings = <String>{...correctedPrimary.warnings};
+    for (final draft in ordered) {
+      warnings.addAll(draft.warnings);
+    }
+    warnings.add(
+      '${attachments.length} fotos agrupadas automáticamente por tu mensaje. '
+      'Puedes abrirlas y elegir cuál usar para el OCR.',
+    );
+
+    final combined = correctedPrimary.copyWith(
+      customerName: correctedPrimary.customerName,
+      customerPhone: correctedPrimary.customerPhone,
+      mediaPath: correctedPrimary.mediaPath.trim().isNotEmpty
+          ? correctedPrimary.mediaPath
+          : (attachments.isEmpty ? '' : attachments.first),
+      attachmentPaths: attachments,
+      warnings: warnings.toList(),
+      status: 'pending',
+      updatedAt: DateTime.now(),
+    );
+    await store.saveDraft(combined);
+    await store.syncOcrKeyEntities(combined);
+
+    for (final draft in ordered) {
+      if (draft.id == combined.id) continue;
+      await store.saveDraft(
+        draft.copyWith(
+          customerName: combined.customerName,
+          customerPhone: combined.customerPhone,
+          status: 'grouped',
+          warnings: <String>{
+            ...draft.warnings,
+            'Esta foto está adjunta al borrador agrupado de ${combined.customerName}.',
+          }.toList(),
+          updatedAt: DateTime.now(),
+        ),
+      );
+    }
+
+    return combined;
+  }
+
   String _fieldLabel(OcrCorrectionField field) {
     return switch (field) {
       OcrCorrectionField.customerName => 'cliente',
@@ -1239,9 +1333,18 @@ class OcrPurchaseService {
 
     final targets = await _targetDrafts(correction, messageNote);
     final updated = <PurchaseDraft>[];
-    for (final draft in targets) {
-      final value = await _applyCorrectionToDraft(draft, correction);
-      if (value != null) updated.add(value);
+
+    if (correction.batch &&
+        correction.field == OcrCorrectionField.customerName &&
+        correction.targetsPurchases &&
+        targets.length > 1) {
+      final grouped = await _groupPurchaseBatch(targets, correction);
+      if (grouped != null) updated.add(grouped);
+    } else {
+      for (final draft in targets) {
+        final value = await _applyCorrectionToDraft(draft, correction);
+        if (value != null) updated.add(value);
+      }
     }
 
     final result = OcrCorrectionApplyResult(
