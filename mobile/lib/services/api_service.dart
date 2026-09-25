@@ -157,6 +157,35 @@ class ApiService {
     }
   }
 
+  Future<bool> saveOcrRemittance({
+    required int noteId,
+    required String source,
+    required String name,
+    required double amount,
+    required String date,
+    required String ocrText,
+  }) async {
+    final url = await baseUrl;
+    if (url.isEmpty) return false;
+    try {
+      final response = await http.post(
+        Uri.parse('$url/api/remittances/ocr'),
+        headers: await _headers(),
+        body: jsonEncode({
+          'note_id': noteId,
+          'source': source,
+          'name': name,
+          'amount': amount,
+          'date': date,
+          'ocr_text': ocrText,
+        }),
+      ).timeout(const Duration(seconds: 12));
+      return response.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<List<Map<String, dynamic>>> getClients() async {
     final url = await baseUrl;
     if (url.isEmpty) return const <Map<String, dynamic>>[];
