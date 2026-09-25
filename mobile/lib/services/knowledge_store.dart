@@ -291,6 +291,75 @@ class KnowledgeStore {
     );
   }
 
+  Future<void> clearOcrEntityLinks(String noteKey) async {
+    final db = await database;
+    const relations = ['detectado', 'mencionado', 'cliente', 'tienda', 'total'];
+    final placeholders = List.filled(relations.length, '?').join(',');
+    final rows = await db.query(
+      'entity_notes',
+      columns: ['entity_id'],
+      where: 'note_key = ? AND relation IN ($placeholders)',
+      whereArgs: [noteKey, ...relations],
+    );
+    final entityIds = rows
+        .map((row) => row['entity_id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet();
+
+    await db.delete(
+      'entity_notes',
+      where: 'note_key = ? AND relation IN ($placeholders)',
+      whereArgs: [noteKey, ...relations],
+    );
+
+    for (final entityId in entityIds) {
+      final links = Sqflite.firstIntValue(
+            await db.rawQuery(
+              'SELECT COUNT(*) FROM entity_notes WHERE entity_id = ?',
+              [entityId],
+            ),
+          ) ??
+          0;
+      if (links == 0) {
+        await db.delete(
+          'entities',
+          where: 'id = ?',
+          whereArgs: [entityId],
+        );
+      }
+    }
+  }
+
+  Future<void> syncOcrKeyEntities(PurchaseDraft draft) async {
+    await clearOcrEntityLinks(draft.noteKey);
+
+    final customer = draft.customerName.trim();
+    if (customer.isNotEmpty) {
+      final entity = await upsertEntity(
+        customer,
+        type: 'cliente',
+        aliases: draft.customerPhone.trim().isEmpty
+            ? const []
+            : [draft.customerPhone.trim()],
+      );
+      await linkEntity(entity.id, draft.noteKey, relation: 'cliente');
+    }
+
+    final shop = draft.store.trim();
+    if (shop.isNotEmpty && shop.toLowerCase() != 'otra tienda') {
+      final entity = await upsertEntity(shop, type: 'tienda');
+      await linkEntity(entity.id, draft.noteKey, relation: 'tienda');
+    }
+
+    if (draft.total > 0) {
+      final amount = 'Total \${draft.total.toStringAsFixed(2)}';
+      final entity = await upsertEntity(amount, type: 'total');
+      await linkEntity(entity.id, draft.noteKey, relation: 'total');
+    }
+
+    await saveNoteState(draft.noteKey, entitiesProcessed: true);
+  }
+
   Future<List<EntityRecord>> entities({String query = ''}) async {
     final db = await database;
     final args = <Object?>[];
