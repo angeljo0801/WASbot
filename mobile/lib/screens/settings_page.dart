@@ -3,6 +3,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../services/api_service.dart';
 import '../services/background_service.dart';
+import '../services/remittance_sms_service.dart';
 import 'backup_page.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -18,6 +19,8 @@ class _SettingsPageState extends State<SettingsPage> {
   final key = TextEditingController();
   final botNumber = TextEditingController();
   final newAllowedNumber = TextEditingController();
+  final newRemittanceAgent = TextEditingController();
+  final remittanceSms = RemittanceSmsService();
 
   String provider = 'twilio';
   List<String> allowedNumbers = [];
@@ -29,6 +32,11 @@ class _SettingsPageState extends State<SettingsPage> {
   Map<String, dynamic>? combo;
   bool backgroundEnabled = true;
   bool backgroundBusy = false;
+  List<String> remittanceAgents = <String>[];
+  String remittanceCode = '';
+  String remittanceCodeDate = '';
+  bool smsPermission = false;
+  bool remittanceBusy = false;
 
   @override
   void initState() {
@@ -42,13 +50,16 @@ class _SettingsPageState extends State<SettingsPage> {
     key.dispose();
     botNumber.dispose();
     newAllowedNumber.dispose();
+    newRemittanceAgent.dispose();
     super.dispose();
   }
 
   Future<void> load() async {
     final s = await widget.api.settings();
     final wa = await widget.api.whatsappSettings();
+    final remittance = await widget.api.remittanceSettings();
     final background = await WhatsBotBackgroundService.preferenceEnabled();
+    final smsAllowed = await remittanceSms.hasPermission();
     if (!mounted) return;
     setState(() {
       url.text = s['url'] ?? '';
@@ -58,6 +69,13 @@ class _SettingsPageState extends State<SettingsPage> {
       final raw = wa['allowed_numbers'];
       allowedNumbers = raw is List ? raw.map((e) => e.toString()).toList() : <String>[];
       whatsappConnected = wa['connected'] as bool?;
+      final rawAgents = remittance['agents'];
+      remittanceAgents = rawAgents is List
+          ? rawAgents.map((e) => e.toString()).toList()
+          : <String>[];
+      remittanceCode = (remittance['daily_code'] ?? '').toString();
+      remittanceCodeDate = (remittance['code_date'] ?? '').toString();
+      smsPermission = smsAllowed;
       backgroundEnabled = background;
       loading = false;
     });
@@ -99,6 +117,87 @@ class _SettingsPageState extends State<SettingsPage> {
     await syncWhatsAppSettings(notify: true);
   }
 
+  Future<void> addRemittanceAgent() async {
+    final normalized = widget.api.normalizePhone(newRemittanceAgent.text);
+    if (normalized.isEmpty) return;
+    final next = <String>{...remittanceAgents, normalized}.toList();
+    setState(() => remittanceBusy = true);
+    final saved = await widget.api.saveRemittanceAgents(next);
+    if (!mounted) return;
+    setState(() {
+      remittanceBusy = false;
+      if (saved.isNotEmpty) {
+        final raw = saved['agents'];
+        remittanceAgents = raw is List
+            ? raw.map((e) => e.toString()).toList()
+            : next;
+        remittanceCode = (saved['daily_code'] ?? remittanceCode).toString();
+        remittanceCodeDate =
+            (saved['code_date'] ?? remittanceCodeDate).toString();
+        newRemittanceAgent.clear();
+      }
+    });
+  }
+
+  Future<void> removeRemittanceAgent(String number) async {
+    final next = remittanceAgents.where((e) => e != number).toList();
+    setState(() => remittanceBusy = true);
+    final saved = await widget.api.saveRemittanceAgents(next);
+    if (!mounted) return;
+    setState(() {
+      remittanceBusy = false;
+      if (saved.isNotEmpty) {
+        final raw = saved['agents'];
+        remittanceAgents = raw is List
+            ? raw.map((e) => e.toString()).toList()
+            : next;
+      }
+    });
+  }
+
+  Future<void> regenerateRemittanceAccessCode() async {
+    if (remittanceBusy) return;
+    setState(() => remittanceBusy = true);
+    final data = await widget.api.regenerateRemittanceCode();
+    if (!mounted) return;
+    setState(() {
+      remittanceBusy = false;
+      if (data.isNotEmpty) {
+        remittanceCode = (data['daily_code'] ?? '').toString();
+        remittanceCodeDate = (data['code_date'] ?? '').toString();
+      }
+    });
+    if (data.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Código regenerado. Las sesiones de agentes anteriores quedaron cerradas.',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> enableRemittanceSms() async {
+    await remittanceSms.requestPermission();
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    final allowed = await remittanceSms.hasPermission();
+    if (!mounted) return;
+    setState(() => smsPermission = allowed);
+    if (allowed) {
+      final imported = await remittanceSms.syncPending(widget.api);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            imported > 0
+                ? 'Permiso activado. Se registraron $imported remesa(s) pendiente(s).'
+                : 'Permiso de SMS activado para remesas de BofA.',
+          ),
+        ),
+      );
+    }
+  }
   Future<void> setBackgroundEnabled(bool value) async {
     if (backgroundBusy) return;
     setState(() => backgroundBusy = true);
@@ -523,10 +622,149 @@ class _SettingsPageState extends State<SettingsPage> {
                           ),
                         ),
                       ),
+                    const Divider(height: 42),
+                    Text(
+                      'Remesas',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'WhatsBot registra las remesas recibidas por SMS de Bank of America con nombre, monto y fecha. Los agentes de esta sección solo pueden consultar Remesas.',
+                    ),
+                    const SizedBox(height: 16),
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(Icons.pin_outlined),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    'Código de agentes de hoy',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleMedium,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            SelectableText(
+                              remittanceCode.isEmpty
+                                  ? '-----'
+                                  : remittanceCode,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .headlineMedium,
+                            ),
+                            if (remittanceCodeDate.isNotEmpty)
+                              Text('Fecha: $remittanceCodeDate'),
+                            const SizedBox(height: 10),
+                            const Text(
+                              'Cambia automáticamente cada día. Al regenerarlo, los agentes autenticados tienen que introducir el nuevo código.',
+                            ),
+                            const SizedBox(height: 12),
+                            OutlinedButton.icon(
+                              onPressed: remittanceBusy
+                                  ? null
+                                  : regenerateRemittanceAccessCode,
+                              icon: const Icon(Icons.refresh),
+                              label: const Text('Regenerar código'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Text(
+                      'Agentes de Remesas',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Estos números pueden escribirle a WhatsBot, pero solo acceden a Remesas después de autenticarse con el código diario. Para comprobar una remesa deben conocer nombre y monto.',
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: newRemittanceAgent,
+                            keyboardType: TextInputType.phone,
+                            decoration: const InputDecoration(
+                              labelText: 'Añadir agente',
+                              hintText: '+1 772 555 0000',
+                              border: OutlineInputBorder(),
+                            ),
+                            onSubmitted: (_) => addRemittanceAgent(),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        SizedBox(
+                          height: 56,
+                          child: FilledButton(
+                            onPressed:
+                                remittanceBusy ? null : addRemittanceAgent,
+                            child: const Icon(Icons.add),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    if (remittanceAgents.isEmpty)
+                      const Card(
+                        child: Padding(
+                          padding: EdgeInsets.all(14),
+                          child: Text('Todavía no hay agentes de Remesas.'),
+                        ),
+                      )
+                    else
+                      ...remittanceAgents.map(
+                        (number) => Card(
+                          child: ListTile(
+                            leading: const Icon(Icons.badge_outlined),
+                            title: Text(number),
+                            subtitle: const Text('Solo Remesas'),
+                            trailing: IconButton(
+                              tooltip: 'Quitar agente',
+                              onPressed: remittanceBusy
+                                  ? null
+                                  : () => removeRemittanceAgent(number),
+                              icon: const Icon(Icons.delete_outline),
+                            ),
+                          ),
+                        ),
+                      ),
+                    const SizedBox(height: 14),
+                    Card(
+                      child: ListTile(
+                        leading: Icon(
+                          smsPermission
+                              ? Icons.sms_outlined
+                              : Icons.sms_failed_outlined,
+                        ),
+                        title: const Text('SMS de Bank of America'),
+                        subtitle: Text(
+                          smsPermission
+                              ? 'Activo. Se procesan automáticamente los SMS con el formato de remesa de BofA.'
+                              : 'Hace falta permiso de SMS para registrar automáticamente las remesas que llegan al teléfono.',
+                        ),
+                        trailing: smsPermission
+                            ? const Icon(Icons.check_circle_outline)
+                            : TextButton(
+                                onPressed: enableRemittanceSms,
+                                child: const Text('Activar'),
+                              ),
+                      ),
+                    ),
                     const SizedBox(height: 26),
                     FilledButton.icon(
-                      onPressed: saving ? null : save,
-                      icon: saving
+                      onPressed: saving ? null : save,                      icon: saving
                           ? const SizedBox.square(
                               dimension: 18,
                               child: CircularProgressIndicator(strokeWidth: 2),
