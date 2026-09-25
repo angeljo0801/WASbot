@@ -165,7 +165,12 @@ class KnowledgePipeline {
         try {
           final draft = await store.draftForNote(key) ?? imageResult?.draft;
           if (draft != null) {
-            await store.syncOcrKeyEntities(draft);
+            if (draft.draftType == 'remittance') {
+              await store.clearOcrEntityLinks(key);
+              await store.saveNoteState(key, entitiesProcessed: true);
+            } else {
+              await store.syncOcrKeyEntities(draft);
+            }
           } else {
             await store.clearOcrEntityLinks(key);
           }

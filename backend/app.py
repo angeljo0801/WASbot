@@ -27,6 +27,7 @@ from remittances import (
     is_agent as is_remittance_agent,
     regenerate_code as regenerate_remittance_code,
     set_agents as set_remittance_agents,
+    upsert_ocr_remittance,
 )
 
 
@@ -645,6 +646,15 @@ class RemittancePayPalEmailCreate(BaseModel):
     email_id: str = ""
 
 
+class RemittanceOcrUpsert(BaseModel):
+    note_id: int = 0
+    source: str
+    name: str = ""
+    amount: float = 0
+    date: str = ""
+    ocr_text: str = ""
+
+
 class NoteCreate(BaseModel):
     title: str
     content: str = ""
@@ -809,6 +819,21 @@ def remittance_paypal_email_create(payload: RemittancePayPalEmailCreate) -> dict
             detail="Email does not match the PayPal payment format",
         )
     return saved
+
+
+@app.post("/api/remittances/ocr", dependencies=[Depends(require_api_key)])
+def remittance_ocr_upsert(payload: RemittanceOcrUpsert) -> dict[str, Any]:
+    try:
+        return upsert_ocr_remittance(
+            payload.note_id,
+            payload.source,
+            payload.name,
+            payload.amount,
+            payload.date,
+            payload.ocr_text,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/api/notes", dependencies=[Depends(require_api_key)])

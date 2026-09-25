@@ -432,6 +432,138 @@ def ingest_paypal_email(
             "duplicate": False,
         }
 
+def upsert_ocr_remittance(
+    note_id: int,
+    source: str,
+    name: str = "",
+    amount: float = 0,
+    date_text: str = "",
+    ocr_text: str = "",
+) -> dict[str, Any]:
+    source_clean = (source or "").strip().lower()
+    if source_clean not in {"zelle", "paypal"}:
+        raise ValueError("Unsupported remittance source")
+
+    clean_name = " ".join((name or "").split()).strip()
+    try:
+        cents = int((Decimal(str(amount or 0)) * 100).quantize(Decimal("1")))
+    except InvalidOperation:
+        cents = 0
+    cents = max(cents, 0)
+
+    received_at = utc_now()
+    display_date = (date_text or "").strip()
+    if display_date:
+        parsed = None
+        for pattern in ("%m/%d/%Y", "%m-%d-%Y"):
+            try:
+                parsed = datetime.strptime(display_date, pattern)
+                break
+            except ValueError:
+                continue
+        if parsed is not None:
+            local = parsed.replace(
+                hour=12,
+                minute=0,
+                second=0,
+                microsecond=0,
+                tzinfo=REMIt_TZ,
+            )
+            received_at = local.astimezone(timezone.utc).isoformat()
+            display_date = local.strftime("%m/%d/%Y")
+
+    amount_text = "$" + f"{cents / 100:.2f}" if cents > 0 else ""
+    source_label = "PayPal" if source_clean == "paypal" else "Zelle"
+    lines = [f"Origen: {source_label}"]
+    if clean_name:
+        lines.append(f"Nombre: {clean_name}")
+    if amount_text:
+        lines.append(f"Monto: {amount_text}")
+    if display_date:
+        lines.append(f"Fecha: {display_date}")
+    content = "\n".join(lines)
+    title_parts = ["Remesa", source_label]
+    if amount_text:
+        title_parts.append(amount_text)
+    title = " · ".join(title_parts)
+    source_key = f"ocr:{note_id}" if note_id > 0 else hashlib.sha256(
+        f"ocr|{source_clean}|{clean_name}|{cents}|{display_date}|{ocr_text}".encode("utf-8")
+    ).hexdigest()
+
+    with closing(db()) as conn:
+        if note_id > 0:
+            conn.execute(
+                """
+                UPDATE notes
+                SET title = ?, content = ?, original_text = ?, category = 'Remesas',
+                    tags = ?, status = 'ready', ai_source = 'rules'
+                WHERE id = ?
+                """,
+                (
+                    title,
+                    content,
+                    content,
+                    json.dumps(["remesa", "ocr", source_clean]),
+                    note_id,
+                ),
+            )
+
+        existing = conn.execute(
+            "SELECT id FROM remittances WHERE source_key = ?",
+            (source_key,),
+        ).fetchone()
+        if existing is None:
+            cur = conn.execute(
+                """
+                INSERT INTO remittances(
+                    sender_name, normalized_name, amount_cents, source, received_at,
+                    raw_text, source_key, note_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    clean_name,
+                    normalize_person_name(clean_name),
+                    cents,
+                    f"ocr_{source_clean}",
+                    received_at,
+                    ocr_text,
+                    source_key,
+                    note_id if note_id > 0 else None,
+                    utc_now(),
+                ),
+            )
+            remittance_id = int(cur.lastrowid)
+        else:
+            remittance_id = int(existing["id"])
+            conn.execute(
+                """
+                UPDATE remittances
+                SET sender_name = ?, normalized_name = ?, amount_cents = ?,
+                    source = ?, received_at = ?, raw_text = ?, note_id = ?
+                WHERE id = ?
+                """,
+                (
+                    clean_name,
+                    normalize_person_name(clean_name),
+                    cents,
+                    f"ocr_{source_clean}",
+                    received_at,
+                    ocr_text,
+                    note_id if note_id > 0 else None,
+                    remittance_id,
+                ),
+            )
+        conn.commit()
+
+    return {
+        "id": remittance_id,
+        "note_id": note_id,
+        "source": source_clean,
+        "name": clean_name,
+        "amount": cents / 100,
+        "date": display_date,
+    }
+
 def _parse_agent_query(text: str) -> tuple[str, int] | None:
     raw = " ".join((text or "").split())
     amount_match = re.search(

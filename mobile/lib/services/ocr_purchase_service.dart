@@ -7,6 +7,7 @@ import '../models/note.dart';
 import '../models/purchase_draft.dart';
 import 'api_service.dart';
 import 'knowledge_store.dart';
+import 'remittance_ocr.dart';
 import 'store_ocr.dart';
 
 class OcrPurchaseResult {
@@ -250,6 +251,104 @@ class OcrPurchaseService {
     return file.path;
   }
 
+  String _remittanceContent(PurchaseDraft draft) {
+    final lines = <String>['Origen: ${draft.remittanceSource}'];
+    if (draft.customerName.trim().isNotEmpty) {
+      lines.add('Nombre: ${draft.customerName.trim()}');
+    }
+    if (draft.total > 0) {
+      lines.add('Monto: \$${draft.total.toStringAsFixed(2)}');
+    }
+    if (draft.remittanceDate.trim().isNotEmpty) {
+      lines.add('Fecha: ${draft.remittanceDate.trim()}');
+    }
+    return lines.join('\n');
+  }
+
+  String _remittanceTitle(PurchaseDraft draft) {
+    final parts = <String>['Remesa', draft.remittanceSource];
+    if (draft.total > 0) {
+      parts.add('\$${draft.total.toStringAsFixed(2)}');
+    }
+    return parts.where((e) => e.trim().isNotEmpty).join(' · ');
+  }
+
+  Future<OcrPurchaseResult> _saveRemittanceDraft({
+    required Note note,
+    required String key,
+    required String path,
+    required String text,
+    required RemittanceOcrParse parsed,
+    required PurchaseDraft? existing,
+  }) async {
+    final now = DateTime.now();
+    final draft = PurchaseDraft(
+      id: existing?.id ??
+          'draft_${key.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_')}',
+      noteKey: key,
+      customerName: (existing?.draftType == 'remittance' &&
+              existing!.customerName.trim().isNotEmpty)
+          ? existing.customerName
+          : parsed.name,
+      customerPhone: '',
+      store: parsed.source,
+      orderNumber: '',
+      description: 'Remesa ${parsed.source}',
+      total: (existing?.draftType == 'remittance' && existing!.total > 0)
+          ? existing.total
+          : parsed.amount,
+      subtotal: 0,
+      tax: 0,
+      shipping: 0,
+      discount: 0,
+      items: const <Map<String, dynamic>>[],
+      ocrText: text,
+      confidence: parsed.confidence,
+      warnings: parsed.warnings,
+      mediaPath: path,
+      status: existing?.status ?? 'pending',
+      draftType: 'remittance',
+      remittanceSource: parsed.source,
+      remittanceDate: (existing?.draftType == 'remittance' &&
+              existing!.remittanceDate.trim().isNotEmpty)
+          ? existing.remittanceDate
+          : parsed.date,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    );
+
+    await store.saveDraft(draft);
+    await store.clearOcrEntityLinks(key);
+    await store.saveNoteState(
+      key,
+      ocrProcessed: true,
+      ocrText: text,
+      localMediaPath: path,
+      entitiesProcessed: true,
+    );
+
+    try {
+      await api.updateNoteManual(
+        note,
+        title: _remittanceTitle(draft),
+        content: _remittanceContent(draft),
+        category: 'Remesas',
+        tags: <String>{
+          ...note.tags,
+          'ocr',
+          'remesa',
+          draft.remittanceSource.toLowerCase(),
+        }.toList(),
+      );
+    } catch (_) {}
+
+    return OcrPurchaseResult(
+      draft: draft,
+      ocrText: text,
+      created: existing == null,
+    );
+  }
+
   Future<OcrPurchaseResult?> processImage(
     Note note, {
     bool force = false,
@@ -276,6 +375,18 @@ class OcrPurchaseService {
       text = recognized.text.trim();
     } finally {
       await recognizer.close();
+    }
+
+    final remittance = RemittanceOcrParser.parse(text);
+    if (remittance.isRemittance) {
+      return _saveRemittanceDraft(
+        note: note,
+        key: key,
+        path: path,
+        text: text,
+        parsed: remittance,
+        existing: existing,
+      );
     }
 
     final parsed = StoreOcrParser.parse(text);

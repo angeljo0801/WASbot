@@ -332,6 +332,10 @@ class KnowledgeStore {
 
   Future<void> syncOcrKeyEntities(PurchaseDraft draft) async {
     await clearOcrEntityLinks(draft.noteKey);
+    if (draft.draftType == 'remittance') {
+      await saveNoteState(draft.noteKey, entitiesProcessed: true);
+      return;
+    }
 
     final customer = draft.customerName.trim();
     final customerAmbiguous = draft.warnings.any((warning) {
