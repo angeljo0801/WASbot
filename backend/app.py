@@ -23,6 +23,7 @@ from remittances import (
     get_agents as get_remittance_agents,
     handle_agent_message as handle_remittance_agent_message,
     ingest_bofa_sms,
+    ingest_paypal_email,
     is_agent as is_remittance_agent,
     regenerate_code as regenerate_remittance_code,
     set_agents as set_remittance_agents,
@@ -637,6 +638,13 @@ class RemittanceSmsCreate(BaseModel):
     sms_id: str = ""
 
 
+class RemittancePayPalEmailCreate(BaseModel):
+    subject: str
+    body: str = ""
+    received_at: str = ""
+    email_id: str = ""
+
+
 class NoteCreate(BaseModel):
     title: str
     content: str = ""
@@ -783,6 +791,22 @@ def remittance_sms_create(payload: RemittanceSmsCreate) -> dict[str, Any]:
         raise HTTPException(
             status_code=422,
             detail="SMS does not match the Bank of America remittance format",
+        )
+    return saved
+
+
+@app.post("/api/remittances/paypal-email", status_code=201, dependencies=[Depends(require_api_key)])
+def remittance_paypal_email_create(payload: RemittancePayPalEmailCreate) -> dict[str, Any]:
+    saved = ingest_paypal_email(
+        payload.subject,
+        payload.body,
+        payload.received_at or utc_now(),
+        payload.email_id,
+    )
+    if saved is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Email does not match the PayPal payment format",
         )
     return saved
 
