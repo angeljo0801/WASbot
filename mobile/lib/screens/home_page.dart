@@ -14,6 +14,7 @@ import '../services/embedding_service.dart';
 import '../services/knowledge_pipeline.dart';
 import '../services/knowledge_store.dart';
 import '../services/note_share_service.dart';
+import '../services/ocr_purchase_service.dart';
 import '../services/remittance_sms_service.dart';
 import '../services/paypal_email_notification_service.dart';
 import 'ai_activity_page.dart';
@@ -271,17 +272,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _processPendingReplies() async {
     if (_replyTickRunning || aiRunning) return;
 
-    final settings = await ai.settings();
-    if (!settings.autoProcess || settings.provider == AiProvider.rules) return;
-    if (settings.provider == AiProvider.device &&
-        settings.deviceModelPath.trim().isEmpty) {
-      return;
-    }
-
     _replyTickRunning = true;
     try {
       final pending = await api.pendingWhatsAppReplies(limit: 5);
       if (pending.isEmpty) return;
+
+      final settings = await ai.settings();
+      final aiAvailable = settings.autoProcess &&
+          settings.provider != AiProvider.rules &&
+          !(settings.provider == AiProvider.device &&
+              settings.deviceModelPath.trim().isEmpty);
 
       for (final note in pending) {
         if (note.sender.trim().isEmpty ||
@@ -289,6 +289,28 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             note.replyStatus == 'sent') {
           continue;
         }
+
+        final rawMessage = note.originalText.trim().isNotEmpty
+            ? note.originalText
+            : note.content;
+        OcrCorrectionApplyResult? correction;
+        try {
+          correction = await knowledge.ocr.applyNaturalLanguageCorrection(
+            rawMessage,
+            note,
+          );
+        } catch (_) {}
+
+        if (correction != null) {
+          final sent = await api.sendAiReply(
+            noteId: note.id,
+            body: correction.confirmation,
+          );
+          if (!sent) break;
+          continue;
+        }
+
+        if (!aiAvailable) continue;
 
         final reply = await ai.replyToWhatsapp(note);
         if (reply.trim().isEmpty) continue;
@@ -304,7 +326,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
     } catch (_) {
       // Keep the backend item pending. A later foreground/background tick
-      // retries after the model or Local AI Manager becomes available again.
+      // retries after the model, storage, or Twilio becomes available again.
     } finally {
       _replyTickRunning = false;
     }
