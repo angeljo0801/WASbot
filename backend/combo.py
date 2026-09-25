@@ -10,7 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body
 
-from assistant_features import log_activity, sync_snapshot_clients
+from assistant_features import log_activity, sync_snapshot_clients, upsert_local_client
 from remittances import set_remittance_status
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
@@ -580,6 +580,28 @@ def process_operator_message(
             clear_pending_operator_action(sender)
             return "Acción cancelada."
         if answer == "yes":
+            if pending_action.get("action_type") == "create_client":
+                payload = pending_action.get("payload") or {}
+                try:
+                    client = upsert_local_client(
+                        str(payload.get("name") or ""),
+                        str(payload.get("phone") or ""),
+                    )
+                except ValueError:
+                    client = None
+                log_activity(
+                    "business_action",
+                    status="completed" if client else "failed",
+                    sender=sender,
+                    detail=pending_action,
+                )
+                clear_pending_operator_action(sender)
+                return (
+                    f"Cliente {client['name']} creado y listo para sincronizar con Paquetería."
+                    if client
+                    else "No pude crear ese cliente."
+                )
+
             if pending_action.get("action_type") == "remittance_status":
                 payload = pending_action.get("payload") or {}
                 remittance_id = int(payload.get("remittanceId") or 0)
