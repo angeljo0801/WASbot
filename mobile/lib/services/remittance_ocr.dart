@@ -100,7 +100,12 @@ class RemittanceOcrParser {
     if (upper.contains('TRANSACTION DATE')) score += 1;
     if (upper.contains('GO TO PAYPAL')) score += 2;
     if (upper.contains('PAYPAL DEBIT')) score += 1;
-    if (upper.contains('MONEY RECEIVED')) score += 1;
+    if (upper.contains('MONEY RECEIVED')) score += 2;
+    if (RegExp(r'(?:YOU\s+RECEIVED|RECEIVED)\s+\$[0-9]', caseSensitive: false)
+        .hasMatch(upper)) {
+      score += 3;
+    }
+    if (upper.contains('AMOUNT') && upper.contains('TRANSACTION')) score += 1;
     return score;
   }
 
@@ -130,6 +135,13 @@ class RemittanceOcrParser {
         upper.contains('EL DINERO GENERALMENTE ESTARÁ DISPONIBLE')) {
       score += 1;
     }
+    if (upper.contains('SUCCESS')) score += 1;
+    if (upper.contains('FROM') &&
+        upper.contains('AMOUNT') &&
+        upper.contains('DATE')) {
+      score += 2;
+    }
+    if (upper.contains('CONFIRMATION NUMBER')) score += 1;
     return score;
   }
 
@@ -141,6 +153,11 @@ class RemittanceOcrParser {
     if (sentYou != null) {
       return _toMoney(sentYou.group(1));
     }
+    final received = RegExp(
+      r'(?:YOU\s+RECEIVED|RECEIVED)\s+\$\s*([0-9]{1,6}(?:,[0-9]{3})*(?:\.[0-9]{2}))',
+      caseSensitive: false,
+    ).firstMatch(joined);
+    if (received != null) return _toMoney(received.group(1));
     return _labeledAmount(lines, const ['AMOUNT', 'MONTO', 'CANTIDAD']);
   }
 
@@ -187,6 +204,15 @@ class RemittanceOcrParser {
     ).firstMatch(joined);
     if (sentYou != null) {
       final value = _cleanName(sentYou.group(2) ?? '');
+      if (_plausibleName(value)) return value;
+    }
+
+    final receivedFrom = RegExp(
+      r'(?:RECEIVED\s+(?:FROM\s+)?|MONEY\s+RECEIVED\s+FROM\s+)([^\n]{2,80})',
+      caseSensitive: false,
+    ).firstMatch(joined);
+    if (receivedFrom != null) {
+      final value = _cleanName(receivedFrom.group(1) ?? '');
       if (_plausibleName(value)) return value;
     }
 
