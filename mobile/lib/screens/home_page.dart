@@ -168,8 +168,49 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _runPostRefreshIntelligence() async {
+    await _repairContactCategories();
     await _processPendingAi();
     await _processKnowledge();
+  }
+
+  Future<void> _repairContactCategories() async {
+    final misplaced = notes
+        .where(
+          (note) =>
+              note.source == 'whatsapp' &&
+              note.messageType == 'contact' &&
+              note.category != 'Clientes',
+        )
+        .take(50)
+        .toList();
+    if (misplaced.isEmpty) return;
+
+    var changed = false;
+    for (final note in misplaced) {
+      try {
+        final tags = <String>{
+          ...note.tags,
+          'contacto',
+          'cliente',
+          'whatsapp',
+        }.toList();
+        await api.updateNoteManual(
+          note,
+          category: 'Clientes',
+          tags: tags,
+        );
+        changed = true;
+      } catch (_) {
+        // Keep the contact pending; a later refresh will retry.
+      }
+    }
+
+    if (changed) {
+      final refreshed =
+          await api.getNotes(query: search.text, category: category);
+      notes = refreshed;
+      if (mounted) setState(() {});
+    }
   }
 
   Future<void> _processKnowledge() async {
