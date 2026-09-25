@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
@@ -17,6 +19,7 @@ import '../services/paypal_email_notification_service.dart';
 import 'ai_settings_page.dart';
 import 'combo_page.dart';
 import 'draft_review_page.dart';
+import 'fullscreen_image_viewer.dart';
 import 'remittance_draft_review_page.dart';
 import 'entities_page.dart';
 import 'knowledge_chat_page.dart';
@@ -64,6 +67,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
   bool _backgroundTickRunning = false;
   bool _replyTickRunning = false;
+  final Map<String, Future<Uint8List?>> _thumbnailCache =
+      <String, Future<Uint8List?>>{};
   final remittanceSms = RemittanceSmsService();
   final payPalEmail = PayPalEmailNotificationService();
 
@@ -413,6 +418,127 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } finally {
       if (mounted) setState(() => aiRunning = false);
     }
+  }
+
+  String? _imagePathFor(Note note) {
+    final media = (note.mediaPath ?? '').trim();
+    if (media.isNotEmpty) return media;
+    for (final path in note.photoPaths) {
+      if (path.trim().isNotEmpty) return path.trim();
+    }
+    return null;
+  }
+
+  bool _isImageNote(Note note) =>
+      note.messageType == 'image' ||
+      _imagePathFor(note) != null ||
+      note.category == 'Fotos';
+
+  Future<Uint8List?> _remoteThumbnail(String path) =>
+      _thumbnailCache.putIfAbsent(path, () => api.fetchMediaBytes(path));
+
+  Widget _imageFallback(Note note) => CircleAvatar(
+        child: Icon(typeIcon(note)),
+      );
+
+  Widget _noteThumbnail(Note note) {
+    final path = _imagePathFor(note);
+    if (path == null || !_isImageNote(note)) {
+      return CircleAvatar(child: Icon(typeIcon(note)));
+    }
+
+    final file = File(path);
+    if (file.existsSync()) {
+      return GestureDetector(
+        onTap: () => _openImagePath(path),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: SizedBox(
+            width: 62,
+            height: 62,
+            child: Image.file(
+              file,
+              fit: BoxFit.cover,
+              cacheWidth: 220,
+              errorBuilder: (_, __, ___) => _imageFallback(note),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return FutureBuilder<Uint8List?>(
+      future: _remoteThumbnail(path),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return SizedBox(
+            width: 62,
+            height: 62,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              ),
+              child: const Center(
+                child: SizedBox.square(
+                  dimension: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            ),
+          );
+        }
+
+        final bytes = snapshot.data;
+        if (bytes == null || bytes.isEmpty) {
+          return _imageFallback(note);
+        }
+
+        return GestureDetector(
+          onTap: () => _openImageBytes(bytes),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: SizedBox(
+              width: 62,
+              height: 62,
+              child: Image.memory(
+                bytes,
+                fit: BoxFit.cover,
+                cacheWidth: 220,
+                gaplessPlayback: true,
+                errorBuilder: (_, __, ___) => _imageFallback(note),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openImagePath(String path) async {
+    if (!mounted) return;
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FullscreenImageViewer.file(
+          title: 'Imagen',
+          path: path,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openImageBytes(Uint8List bytes) async {
+    if (!mounted) return;
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FullscreenImageViewer.memory(
+          title: 'Imagen',
+          bytes: bytes,
+        ),
+      ),
+    );
   }
 
   bool get selectionMode => selectedNoteIds.isNotEmpty;
@@ -778,13 +904,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 child: ListTile(
                   contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   selected: selectedNoteIds.contains(n.id),
-                  leading: CircleAvatar(
-                    child: Icon(
-                      selectionMode && selectedNoteIds.contains(n.id)
-                          ? Icons.check
-                          : typeIcon(n),
-                    ),
-                  ),
+                  leading: selectionMode &&
+                          selectedNoteIds.contains(n.id)
+                      ? const CircleAvatar(child: Icon(Icons.check))
+                      : _noteThumbnail(n),
                   title: Text(n.title, maxLines: 2, overflow: TextOverflow.ellipsis),
                   subtitle: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
