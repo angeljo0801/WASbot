@@ -1064,7 +1064,121 @@ class OcrPurchaseService {
     if (firstUpdated == null) return correction.value;
     return switch (correction.field) {
       OcrCorrectionField.customerName => firstUpdated.customerName,
-      OcrCorrectionField.total => '$' + firstUpdated.total.toStringAsFixed(2),
+      OcrCorrectionField.total => '\\
+      OcrCorrectionField.store => firstUpdated.store,
+      OcrCorrectionField.orderNumber => firstUpdated.orderNumber,
+      OcrCorrectionField.description => firstUpdated.description,
+      OcrCorrectionField.remittanceDate => firstUpdated.remittanceDate,
+      OcrCorrectionField.remittanceSource => firstUpdated.remittanceSource,
+    };
+  }
+
+  String _confirmation(
+    OcrNaturalCorrection correction,
+    int updatedCount,
+    PurchaseDraft? firstUpdated,
+  ) {
+    final target = correction.targetsRemittances ? 'remesa' : 'compra';
+    if (updatedCount <= 0) {
+      return 'Entendí que quieres corregir el campo ' +
+          _fieldLabel(correction.field) +
+          ', pero no encontré ' +
+          (correction.batch ? target + 's recientes' : 'una ' + target + ' reciente') +
+          ' para actualizar.';
+    }
+    final value = _displayCorrectionValue(correction, firstUpdated);
+    final where = updatedCount == 1
+        ? 'en la ' + target
+        : 'en ' + updatedCount.toString() + ' ' + target + 's';
+    return 'Listo. Actualicé el campo ' +
+        _fieldLabel(correction.field) +
+        ' a “' +
+        value +
+        '” ' +
+        where +
+        '.';
+  }
+
+  Future<OcrCorrectionApplyResult?> applyNaturalLanguageCorrection(
+    String message,
+    Note messageNote,
+  ) async {
+    final correction = OcrNaturalCorrectionParser.parse(message);
+    if (correction == null) return null;
+
+    final prefs = await SharedPreferences.getInstance();
+    final resultKey = _correctionResultKey(messageNote);
+    final cached = prefs.getString(resultKey);
+    if (cached != null && cached.trim().isNotEmpty) {
+      try {
+        return OcrCorrectionApplyResult.fromJson(
+          jsonDecode(cached) as Map<String, dynamic>,
+        );
+      } catch (_) {}
+    }
+
+    final targets = await _targetDrafts(correction, messageNote);
+    final updated = <PurchaseDraft>[];
+    for (final draft in targets) {
+      final value = await _applyCorrectionToDraft(draft, correction);
+      if (value != null) updated.add(value);
+    }
+
+    final result = OcrCorrectionApplyResult(
+      correction: correction,
+      updatedCount: updated.length,
+      confirmation: _confirmation(
+        correction,
+        updated.length,
+        updated.isEmpty ? null : updated.first,
+      ),
+      noteKeys: updated.map((draft) => draft.noteKey).toList(),
+    );
+
+    if (updated.isNotEmpty) {
+      await prefs.setString(resultKey, jsonEncode(result.toJson()));
+      if (correction.field == OcrCorrectionField.customerName) {
+        final resolvedName = updated.first.customerName.trim();
+        if (resolvedName.isNotEmpty) {
+          final entity = await store.upsertEntity(
+            resolvedName,
+            type: 'cliente',
+            aliases: updated.first.customerPhone.trim().isEmpty
+                ? const []
+                : [updated.first.customerPhone.trim()],
+          );
+          await store.linkEntity(
+            entity.id,
+            KnowledgeStore.noteKey(messageNote),
+            relation: 'corrección',
+          );
+        }
+      }
+    }
+    return result;
+  }
+
+  String? customerCorrection(String text) {
+    final correction = OcrNaturalCorrectionParser.parse(text);
+    if (correction?.field != OcrCorrectionField.customerName) return null;
+    return correction!.value;
+  }
+
+  Future<PurchaseDraft?> applyCustomerCorrection(
+    String message,
+    Note messageNote,
+  ) async {
+    final result = await applyNaturalLanguageCorrection(message, messageNote);
+    if (result == null ||
+        result.correction.field != OcrCorrectionField.customerName ||
+        result.noteKeys.isEmpty) {
+      return null;
+    }
+    return store.draftForNote(result.noteKeys.first);
+  }
+
+}
+ + firstUpdated.total.toStringAsFixed(2),
       OcrCorrectionField.store => firstUpdated.store,
       OcrCorrectionField.orderNumber => firstUpdated.orderNumber,
       OcrCorrectionField.description => firstUpdated.description,
