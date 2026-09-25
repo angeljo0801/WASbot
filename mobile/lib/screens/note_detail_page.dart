@@ -13,6 +13,7 @@ import '../services/knowledge_store.dart';
 import '../services/note_share_service.dart';
 import '../services/ocr_purchase_service.dart';
 import 'draft_review_page.dart';
+import 'remittance_draft_review_page.dart';
 import 'fullscreen_image_viewer.dart';
 
 class NoteDetailPage extends StatefulWidget {
@@ -64,6 +65,28 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
     final value = await KnowledgeStore.instance
         .draftForNote(KnowledgeStore.noteKey(note));
     if (mounted) setState(() => draft = value);
+  }
+
+  Future<void> _openDraftReview() async {
+    final current = draft;
+    if (current == null) return;
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => current.draftType == 'remittance'
+            ? RemittanceDraftReviewPage(
+                draft: current,
+                api: widget.api,
+              )
+            : DraftReviewPage(
+                draft: current,
+                api: widget.api,
+              ),
+      ),
+    );
+    if (changed == true) {
+      await loadDraft();
+    }
   }
 
   Future<void> _runOcr({bool force = false, bool auto = false}) async {
@@ -429,7 +452,7 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
                             child: Text(
                               draft != null
                                   ? 'OCR procesado'
-                                  : 'OCR de compra',
+                                  : 'OCR de imagen',
                               style: Theme.of(context).textTheme.titleMedium,
                             ),
                           ),
@@ -445,7 +468,7 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
                         ocrStatus ??
                             (draft != null
                                 ? 'La imagen ya fue analizada y tiene un borrador listo para revisar.'
-                                : 'WhatsBot intentará leer la imagen automáticamente y preparar un borrador como en Paquetería.'),
+                                : 'WhatsBot decidirá si la imagen es una compra o una remesa y preparará el borrador correspondiente.'),
                       ),
                       const SizedBox(height: 12),
                       Row(
@@ -472,18 +495,7 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
                             Expanded(
                               child: OutlinedButton.icon(
                                 onPressed: () async {
-                                  final changed = await Navigator.push<bool>(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) => DraftReviewPage(
-                                        draft: draft!,
-                                        api: widget.api,
-                                      ),
-                                    ),
-                                  );
-                                  if (changed == true) {
-                                    await loadDraft();
-                                  }
+                                  await _openDraftReview();
                                 },
                                 icon: const Icon(Icons.preview_outlined),
                                 label: const Text('Ver borrador'),
@@ -502,24 +514,25 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
               Card(
                 child: ListTile(
                   leading: const Icon(Icons.pending_actions_outlined),
-                  title: const Text('Pedido detectado · pendiente'),
+                  title: Text(
+                    draft!.draftType == 'remittance'
+                        ? 'Remesa detectada · pendiente'
+                        : 'Pedido detectado · pendiente',
+                  ),
                   subtitle: Text(
-                    draft!.customerName.isEmpty
-                        ? 'OCR listo. Revisa y asigna el cliente.'
-                        : 'Cliente: ${draft!.customerName} · ${draft!.store}',
+                    draft!.draftType == 'remittance'
+                        ? [
+                            draft!.remittanceSource,
+                            if (draft!.total > 0)
+                              '\\${draft!.total.toStringAsFixed(2)}',
+                          ].where((e) => e.trim().isNotEmpty).join(' · ')
+                        : draft!.customerName.isEmpty
+                            ? 'OCR listo. Revisa y asigna el cliente.'
+                            : 'Cliente: ${draft!.customerName} · ${draft!.store}',
                   ),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () async {
-                    final changed = await Navigator.push<bool>(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => DraftReviewPage(
-                          draft: draft!,
-                          api: widget.api,
-                        ),
-                      ),
-                    );
-                    if (changed == true) loadDraft();
+                    await _openDraftReview();
                   },
                 ),
               ),
