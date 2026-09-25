@@ -30,6 +30,84 @@ class OcrPurchaseService {
     KnowledgeStore? store,
   }) : store = store ?? KnowledgeStore.instance;
 
+  String? _learnedValue(
+    List<Map<String, dynamic>> hints,
+    String field,
+    String original,
+  ) {
+    final clean = original.trim();
+    if (clean.isEmpty) return null;
+    for (final hint in hints) {
+      if ((hint['field_name'] ?? '').toString() != field) continue;
+      if ((hint['original_value'] ?? '').toString().trim() != clean) continue;
+      final corrected = (hint['corrected_value'] ?? '').toString().trim();
+      if (corrected.isNotEmpty) return corrected;
+    }
+    return null;
+  }
+
+  Future<RemittanceOcrParse> _applyRemittanceLearning(
+    RemittanceOcrParse parsed,
+  ) async {
+    if (!parsed.isRemittance || parsed.source.trim().isEmpty) return parsed;
+    final hints = await api.getOcrCorrections(parsed.source);
+    if (hints.isEmpty) return parsed;
+
+    final learnedName = _learnedValue(hints, 'name', parsed.name);
+    final amountOriginal =
+        parsed.amount > 0 ? parsed.amount.toStringAsFixed(2) : '';
+    final learnedAmount =
+        _learnedValue(hints, 'amount', amountOriginal);
+    final learnedDate = _learnedValue(hints, 'date', parsed.date);
+
+    return RemittanceOcrParse(
+      isRemittance: parsed.isRemittance,
+      source: parsed.source,
+      name: learnedName ?? parsed.name,
+      amount: double.tryParse(learnedAmount ?? '') ?? parsed.amount,
+      date: learnedDate ?? parsed.date,
+      confidence: parsed.confidence,
+      warnings: [
+        ...parsed.warnings,
+        if (learnedName != null ||
+            learnedAmount != null ||
+            learnedDate != null)
+          'Se aplicó una corrección aprendida de revisiones anteriores.',
+      ],
+    );
+  }
+
+  Future<StoreOcrParse> _applyStoreLearning(StoreOcrParse parsed) async {
+    if (parsed.store.trim().isEmpty) return parsed;
+    final hints = await api.getOcrCorrections(parsed.store);
+    if (hints.isEmpty) return parsed;
+
+    final totalOriginal =
+        parsed.total > 0 ? parsed.total.toStringAsFixed(2) : '';
+    final learnedTotal = _learnedValue(hints, 'total', totalOriginal);
+    final learnedOrder =
+        _learnedValue(hints, 'order_number', parsed.orderNumber);
+    final changed = learnedTotal != null || learnedOrder != null;
+    if (!changed) return parsed;
+
+    return StoreOcrParse(
+      store: parsed.store,
+      orderNumber: learnedOrder ?? parsed.orderNumber,
+      total: double.tryParse(learnedTotal ?? '') ?? parsed.total,
+      subtotal: parsed.subtotal,
+      tax: parsed.tax,
+      shipping: parsed.shipping,
+      discount: parsed.discount,
+      expectedItemCount: parsed.expectedItemCount,
+      items: parsed.items,
+      warnings: [
+        ...parsed.warnings,
+        'Se aplicó una corrección aprendida de revisiones anteriores.',
+      ],
+      confidence: parsed.confidence,
+    );
+  }
+
   String _cleanCustomerCandidate(String raw) {
     var value = raw.trim();
     value = value.replaceFirst(
@@ -377,8 +455,9 @@ class OcrPurchaseService {
       await recognizer.close();
     }
 
-    final remittance = RemittanceOcrParser.parse(text);
+    var remittance = RemittanceOcrParser.parse(text);
     if (remittance.isRemittance) {
+      remittance = await _applyRemittanceLearning(remittance);
       return _saveRemittanceDraft(
         note: note,
         key: key,
@@ -389,8 +468,20 @@ class OcrPurchaseService {
       );
     }
 
-    final parsed = StoreOcrParser.parse(text);
+    var parsed = StoreOcrParser.parse(text);
+    parsed = await _applyStoreLearning(parsed);
     final customerResolution = await _resolveCustomerFromOcr(text);
+    final clientHints = await api.getOcrCorrections(parsed.store);
+    final learnedCustomer = _learnedValue(
+      clientHints,
+      'customer_name',
+      customerResolution['name'] ?? '',
+    );
+    if (learnedCustomer != null) {
+      customerResolution['name'] = learnedCustomer;
+      customerResolution['warning'] =
+          'Se aplicó una corrección aprendida para el nombre del cliente.';
+    }
     final warnings = <String>[...parsed.warnings];
     final customerWarning = customerResolution['warning'] ?? '';
     if (customerWarning.isNotEmpty) {
