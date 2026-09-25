@@ -6,8 +6,23 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api_service.dart';
 
+class PaqueteriaPurchaseShareResult {
+  final bool uploaded;
+  final bool pending;
+  final int pendingCount;
+  final String message;
+
+  const PaqueteriaPurchaseShareResult({
+    required this.uploaded,
+    required this.pending,
+    required this.pendingCount,
+    required this.message,
+  });
+}
+
 class PaqueteriaPurchaseSyncService {
   static const _queueKey = 'paqueteria_purchase_sync_queue';
+  static const _lastErrorKey = 'paqueteria_purchase_sync_last_error';
 
   final ApiService api;
 
@@ -31,7 +46,7 @@ class PaqueteriaPurchaseSyncService {
     await prefs.setString(_queueKey, jsonEncode(queue));
   }
 
-  Future<void> enqueue({
+  Future<PaqueteriaPurchaseShareResult> enqueue({
     required String externalId,
     required String customerName,
     required String customerPhone,
@@ -70,15 +85,62 @@ class PaqueteriaPurchaseSyncService {
     }
     await _saveQueue(queue);
     await flush();
+
+    final remaining = await _queue();
+    final stillPending = remaining.any(
+      (entry) => entry['external_id'] == externalId,
+    );
+    final prefs = await SharedPreferences.getInstance();
+    final lastError = (prefs.getString(_lastErrorKey) ?? '').trim();
+    final url = await api.baseUrl;
+    final key = await api.apiKey;
+
+    if (!stillPending) {
+      return PaqueteriaPurchaseShareResult(
+        uploaded: true,
+        pending: false,
+        pendingCount: remaining.length,
+        message:
+            'WhatsBot compartió la compra con el puente de Paquetería.',
+      );
+    }
+
+    var message = 'La compra quedó pendiente de sincronizar con Paquetería.';
+    if (url.trim().isEmpty) {
+      message = 'Configura el servidor de WhatsBot para compartir con Paquetería.';
+    } else if (key.trim().isEmpty) {
+      message = 'Falta la clave de sincronización para compartir con Paquetería.';
+    } else if (lastError.isNotEmpty) {
+      message = 'No se pudo compartir ahora: $lastError';
+    }
+
+    return PaqueteriaPurchaseShareResult(
+      uploaded: false,
+      pending: true,
+      pendingCount: remaining.length,
+      message: message,
+    );
   }
 
   Future<int> flush() async {
+    final prefs = await SharedPreferences.getInstance();
     final url = await api.baseUrl;
-    if (url.isEmpty) return 0;
+    if (url.isEmpty) {
+      await prefs.setString(_lastErrorKey, 'servidor no configurado');
+      return 0;
+    }
     final key = await api.apiKey;
+    if (key.isEmpty) {
+      await prefs.setString(_lastErrorKey, 'clave de sincronización vacía');
+      return 0;
+    }
     var queue = await _queue();
-    if (queue.isEmpty) return 0;
+    if (queue.isEmpty) {
+      await prefs.remove(_lastErrorKey);
+      return 0;
+    }
     var synced = 0;
+    var lastError = '';
     final pending = <Map<String, dynamic>>[];
 
     for (final item in queue) {
@@ -129,13 +191,23 @@ class PaqueteriaPurchaseSyncService {
           synced++;
         } else {
           pending.add(item);
+          final body = response.body.trim();
+          final shortBody = body.length > 180 ? body.substring(0, 180) : body;
+          lastError = 'servidor respondió ${response.statusCode}' +
+              (shortBody.isEmpty ? '' : ': $shortBody');
         }
-      } catch (_) {
+      } catch (e) {
         pending.add(item);
+        lastError = e.toString();
       }
     }
     queue = pending;
     await _saveQueue(queue);
+    if (lastError.isEmpty) {
+      await prefs.remove(_lastErrorKey);
+    } else {
+      await prefs.setString(_lastErrorKey, lastError);
+    }
     return synced;
   }
 
