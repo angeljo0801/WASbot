@@ -7,6 +7,7 @@ import '../models/note.dart';
 import '../models/purchase_draft.dart';
 import 'api_service.dart';
 import 'knowledge_store.dart';
+import 'photo_storage_service.dart';
 import 'remittance_ocr.dart';
 import 'store_ocr.dart';
 
@@ -24,6 +25,7 @@ class OcrPurchaseResult {
 class OcrPurchaseService {
   final ApiService api;
   final KnowledgeStore store;
+  final PhotoStorageService photoStorage = PhotoStorageService.instance;
 
   OcrPurchaseService({
     required this.api,
@@ -407,6 +409,12 @@ class OcrPurchaseService {
       localMediaPath: path,
       entitiesProcessed: true,
     );
+    await photoStorage.archiveClassifiedNote(
+      note,
+      api,
+      kind: PhotoFolderKind.remittances,
+      localPath: path,
+    );
 
     try {
       await api.updateNoteManual(
@@ -438,6 +446,23 @@ class OcrPurchaseService {
     final key = KnowledgeStore.noteKey(note);
     final existing = await store.draftForNote(key);
     if (!force && await store.isOcrProcessed(key) && existing != null) {
+      if (existing.draftType == 'remittance') {
+        await photoStorage.archiveClassifiedNote(
+          note,
+          api,
+          kind: PhotoFolderKind.remittances,
+          localPath: existing.mediaPath,
+        );
+      } else if (existing.total > 0 ||
+          existing.items.isNotEmpty ||
+          existing.store != 'Otra tienda') {
+        await photoStorage.archiveClassifiedNote(
+          note,
+          api,
+          kind: PhotoFolderKind.purchases,
+          localPath: existing.mediaPath,
+        );
+      }
       return OcrPurchaseResult(
         draft: existing,
         ocrText: existing.ocrText,
@@ -566,6 +591,18 @@ class OcrPurchaseService {
       ocrText: text,
       localMediaPath: path,
     );
+
+    final recognizedPurchase = parsed.total > 0 ||
+        parsed.items.isNotEmpty ||
+        parsed.store != 'Otra tienda';
+    if (recognizedPurchase) {
+      await photoStorage.archiveClassifiedNote(
+        note,
+        api,
+        kind: PhotoFolderKind.purchases,
+        localPath: path,
+      );
+    }
 
     if (text.isNotEmpty) {
       final current = note.content.trim();
