@@ -11,6 +11,12 @@ class Note {
   final String status;
   final String aiProvider;
   final String? mediaPath;
+  final String sender;
+  final String messageSid;
+  final String replyStatus;
+  final String replyText;
+  final String replyError;
+  final DateTime? repliedAt;
   final String customerName;
   final String customerPhone;
   final List<String> photoPaths;
@@ -30,6 +36,12 @@ class Note {
     required this.createdAt,
     this.remoteId,
     this.mediaPath,
+    this.sender = '',
+    this.messageSid = '',
+    this.replyStatus = 'none',
+    this.replyText = '',
+    this.replyError = '',
+    this.repliedAt,
     this.customerName = '',
     this.customerPhone = '',
     this.photoPaths = const <String>[],
@@ -52,6 +64,12 @@ class Note {
         status: (json['status'] ?? 'ready').toString(),
         aiProvider: (json['ai_provider'] ?? json['ai_source'] ?? 'rules').toString(),
         mediaPath: json['media_path']?.toString(),
+        sender: (json['sender'] ?? '').toString(),
+        messageSid: (json['message_sid'] ?? '').toString(),
+        replyStatus: (json['reply_status'] ?? 'none').toString(),
+        replyText: (json['reply_text'] ?? '').toString(),
+        replyError: (json['reply_error'] ?? '').toString(),
+        repliedAt: DateTime.tryParse((json['replied_at'] ?? '').toString()),
         customerName: (json['customer_name'] ?? '').toString(),
         customerPhone: (json['customer_phone'] ?? '').toString(),
         photoPaths: ((json['photo_paths'] as List?) ?? const [])
@@ -73,6 +91,12 @@ class Note {
     String? status,
     String? aiProvider,
     String? mediaPath,
+    String? sender,
+    String? messageSid,
+    String? replyStatus,
+    String? replyText,
+    String? replyError,
+    DateTime? repliedAt,
     String? customerName,
     String? customerPhone,
     List<String>? photoPaths,
@@ -91,6 +115,12 @@ class Note {
         status: status ?? this.status,
         aiProvider: aiProvider ?? this.aiProvider,
         mediaPath: mediaPath ?? this.mediaPath,
+        sender: sender ?? this.sender,
+        messageSid: messageSid ?? this.messageSid,
+        replyStatus: replyStatus ?? this.replyStatus,
+        replyText: replyText ?? this.replyText,
+        replyError: replyError ?? this.replyError,
+        repliedAt: repliedAt ?? this.repliedAt,
         customerName: customerName ?? this.customerName,
         customerPhone: customerPhone ?? this.customerPhone,
         photoPaths: photoPaths ?? this.photoPaths,
@@ -110,6 +140,12 @@ class Note {
         'status': status,
         'ai_provider': aiProvider,
         'media_path': mediaPath,
+        'sender': sender,
+        'message_sid': messageSid,
+        'reply_status': replyStatus,
+        'reply_text': replyText,
+        'reply_error': replyError,
+        'replied_at': repliedAt?.toIso8601String(),
         'customer_name': customerName,
         'customer_phone': customerPhone,
         'photo_paths': photoPaths,
