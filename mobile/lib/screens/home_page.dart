@@ -167,7 +167,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await remittanceSms.syncPending(api);
       await payPalEmail.syncPending(api);
       notes = await api.getNotes(query: search.text, category: category);
-      unawaited(photoStorage.archiveIncomingNotes(notes, api, limit: 20));
+      unawaited(() async {
+        final allNotes = search.text.trim().isEmpty && category == 'Todas'
+            ? notes
+            : await api.getNotes();
+        await photoStorage.archiveIncomingNotes(allNotes, api, limit: 20);
+      }());
     } catch (e) {
       error = 'Configura el servidor para comenzar. $e';
     } finally {
