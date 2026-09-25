@@ -16,8 +16,10 @@ import '../services/knowledge_store.dart';
 import '../services/note_share_service.dart';
 import '../services/remittance_sms_service.dart';
 import '../services/paypal_email_notification_service.dart';
+import 'ai_activity_page.dart';
 import 'ai_settings_page.dart';
 import 'combo_page.dart';
+import 'conversations_page.dart';
 import 'draft_review_page.dart';
 import 'fullscreen_image_viewer.dart';
 import 'remittance_draft_review_page.dart';
@@ -666,6 +668,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
               ]
             : [
+          IconButton(
+            tooltip: 'Conversaciones de WhatsApp',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ConversationsPage(api: api),
+              ),
+            ),
+            icon: const Icon(Icons.forum_outlined),
+          ),
+          IconButton(
+            tooltip: 'Actividad de WhatsBot',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => AiActivityPage(api: api),
+              ),
+            ),
+            icon: const Icon(Icons.timeline_outlined),
+          ),
           IconButton(
             tooltip: 'Chat con tus notas',
             onPressed: () => Navigator.push(

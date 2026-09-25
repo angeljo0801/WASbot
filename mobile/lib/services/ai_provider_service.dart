@@ -294,10 +294,27 @@ class AiProviderService {
         'privados ni información de otras personas. Si el mensaje solo parece una nota '
         'personal para guardar, confirma brevemente que fue recibida.';
 
+    final memory = note.conversationContext.trim();
+    final business = note.businessContext.trim();
+    final prompt = StringBuffer()
+      ..writeln('Mensaje actual:')
+      ..writeln(message);
+    if (memory.isNotEmpty) {
+      prompt
+        ..writeln()
+        ..writeln('Contexto de la conversación y datos actuales:')
+        ..writeln(memory);
+    } else if (business.isNotEmpty) {
+      prompt
+        ..writeln()
+        ..writeln('Datos actuales del negocio:')
+        ..writeln(business);
+    }
+
     final answer = await ask(
       system: system,
-      prompt: message,
-      maxTokens: 500,
+      prompt: prompt.toString(),
+      maxTokens: 600,
       temperature: 0.25,
     );
     return answer.trim();

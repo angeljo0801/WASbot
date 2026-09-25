@@ -155,19 +155,26 @@ ocr_note = remittances.upsert_ocr_remittance(
     ocr_text='Alexandre Adam-tremblay sent you $158.99 USD\nTransaction ID secret',
 )
 assert ocr_note['note_id'] == ocr_note_id
+assert ocr_note['duplicate'] is True
+assert ocr_note['duplicate_of'] == paypal_saved['id']
 
 with remittances.db() as conn:
     updated_note = conn.execute(
         'SELECT * FROM notes WHERE id = ?',
         (ocr_note_id,),
     ).fetchone()
+    remittance_count = conn.execute(
+        'SELECT COUNT(*) AS n FROM remittances WHERE amount_cents = 15899'
+    ).fetchone()['n']
 
+assert remittance_count == 1
 assert updated_note['category'] == 'Remesas'
-assert updated_note['title'] == 'Remesa · PayPal · $158.99'
+assert updated_note['title'] == 'Remesa · PayPal · $158.99 · DUPLICADO'
 assert 'Origen: PayPal' in updated_note['content']
 assert 'Nombre: Alexandre Adam-tremblay' in updated_note['content']
 assert 'Monto: $158.99' in updated_note['content']
 assert 'Fecha: 09/23/2026' in updated_note['content']
+assert 'Posible duplicado de remesa #' in updated_note['content']
 assert 'Transaction ID' not in updated_note['content']
 assert updated_note['original_text'] == updated_note['content']
 
@@ -196,6 +203,8 @@ assert ocr_paypal['source'] == 'paypal'
 assert ocr_paypal['name'] == 'Alexandre Adam-tremblay'
 assert ocr_paypal['amount'] == 158.99
 assert ocr_paypal['date'] == '09/23/2026'
+assert ocr_paypal['duplicate'] is True
+assert ocr_paypal['duplicate_of'] == paypal_saved['id']
 agents = remittances.set_agents(['+1 (772) 555-0123'])
 assert agents == ['+17725550123']
 code, day = remittances.ensure_daily_code()

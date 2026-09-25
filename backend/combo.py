@@ -10,6 +10,9 @@ from typing import Any
 
 from fastapi import APIRouter, Body
 
+from assistant_features import log_activity, sync_snapshot_clients, upsert_local_client
+from remittances import set_remittance_status
+
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "whatsbot.db"
@@ -115,9 +118,11 @@ def put_snapshot(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[s
             (now,),
         )
         conn.commit()
+    synced_clients = sync_snapshot_clients(payload)
     return {
         "ok": True,
         "updated_at": now,
+        "synced_clients": synced_clients,
         "counts": {k: len(v) for k, v in payload.items() if isinstance(v, list)},
     }
 
@@ -566,15 +571,159 @@ def process_operator_message(
     if pending_action is not None:
         answer = yes_no(body)
         if answer == "no":
+            log_activity(
+                "business_action",
+                status="cancelled",
+                sender=sender,
+                detail=pending_action,
+            )
             clear_pending_operator_action(sender)
             return "Acción cancelada."
         if answer == "yes":
+            if pending_action.get("action_type") == "create_client":
+                payload = pending_action.get("payload") or {}
+                try:
+                    client = upsert_local_client(
+                        str(payload.get("name") or ""),
+                        str(payload.get("phone") or ""),
+                    )
+                except ValueError:
+                    client = None
+                log_activity(
+                    "business_action",
+                    status="completed" if client else "failed",
+                    sender=sender,
+                    detail=pending_action,
+                )
+                clear_pending_operator_action(sender)
+                return (
+                    f"Cliente {client['name']} creado y listo para sincronizar con Paquetería."
+                    if client
+                    else "No pude crear ese cliente."
+                )
+
+            if pending_action.get("action_type") == "remittance_status":
+                payload = pending_action.get("payload") or {}
+                remittance_id = int(payload.get("remittanceId") or 0)
+                status = str(payload.get("status") or "")
+                ok = set_remittance_status(remittance_id, status)
+                log_activity(
+                    "business_action",
+                    status="completed" if ok else "failed",
+                    sender=sender,
+                    detail=pending_action,
+                )
+                clear_pending_operator_action(sender)
+                return (
+                    f"Remesa #{remittance_id} cambiada a “{status}”."
+                    if ok
+                    else "No pude encontrar esa remesa para actualizarla."
+                )
+
             action_id = enqueue_paqueteria_action(pending_action)
+            log_activity(
+                "business_action",
+                status="queued",
+                sender=sender,
+                detail={"action_id": action_id, **pending_action},
+            )
             clear_pending_operator_action(sender)
             return f"Acción #{action_id} enviada a Paquetería. Se aplicará en la próxima sincronización."
         return "Tengo una acción pendiente. Responde Sí para confirmarla o No para cancelarla."
 
     clean = clean_text(body)
+
+    create_client_action = re.search(
+        r"(?:crea|crear|agrega|añade)\s+(?:un\s+)?cliente\s+(?:llamado\s+|que\s+se\s+llama\s+)?(.+)$",
+        body.strip(),
+        flags=re.IGNORECASE,
+    )
+    if create_client_action:
+        raw_client = " ".join((create_client_action.group(1) or "").split()).strip()
+        phone_match = re.search(
+            r"\s+(?:telefono|tel|phone)\s*[:#-]?\s*([+\d ()-]{7,})$",
+            raw_client,
+            flags=re.IGNORECASE,
+        )
+        phone = normalize_phone(phone_match.group(1) if phone_match else "")
+        name_raw = raw_client[:phone_match.start()] if phone_match else raw_client
+        name = name_raw.strip(" ,.-")
+        if name:
+            action = {
+                "action_type": "create_client",
+                "payload": {"name": name, "phone": phone},
+            }
+            save_pending_operator_action(sender, action)
+            summary = f"Voy a crear el cliente “{name}”"
+            if phone:
+                summary += f" con teléfono {phone}"
+            return summary + ". ¿Confirmas? Responde Sí o No."
+
+    associate_action = re.search(
+        r"(?:asocia|asociar|vincula|vincular)\s+(?:la\s+)?compra\s+([^\s,]+)\s+(?:a|con)\s+(.+)$",
+        clean,
+    )
+    if associate_action:
+        purchase_query = associate_action.group(1).strip()
+        client_query = associate_action.group(2).strip()
+        payload = snapshot()["payload"]
+        client = find_client(payload, client_query)
+        if client is None:
+            return "No encontré ese cliente en Paquetería."
+        purchase = None
+        for row in active(payload.get("purchases")):
+            candidates = {
+                clean_text(str(row.get("id") or "")),
+                clean_text(str(row.get("orderNumber") or row.get("order_number") or "")),
+                clean_text(str(row.get("externalId") or row.get("external_id") or "")),
+            }
+            if clean_text(purchase_query) in candidates:
+                purchase = row
+                break
+        if purchase is None:
+            return "No encontré esa compra en Paquetería."
+        action = {
+            "action_type": "associate_purchase_client",
+            "payload": {
+                "purchaseId": str(purchase.get("id") or ""),
+                "purchaseExternalId": str(
+                    purchase.get("externalId") or purchase.get("external_id") or ""
+                ),
+                "clientId": str(client.get("id") or ""),
+                "clientName": str(client.get("name") or client_query),
+            },
+        }
+        save_pending_operator_action(sender, action)
+        return (
+            f"Voy a asociar la compra {purchase_query} con "
+            f"{client.get('name')}. ¿Confirmas? Responde Sí o No."
+        )
+
+    remittance_action = re.search(
+        r"(?:marca|cambia)\s+(?:la\s+)?remesa\s+#?([0-9]+)\s+(?:como|a)\s+(.+)$",
+        clean,
+    )
+    if remittance_action:
+        remittance_id = int(remittance_action.group(1))
+        requested = remittance_action.group(2).strip()
+        status_map = {
+            "pendiente": "Pendiente",
+            "identificada": "Identificada",
+            "entregada": "Entregada",
+            "liquidada": "Liquidada",
+        }
+        status = status_map.get(requested)
+        if status:
+            action = {
+                "action_type": "remittance_status",
+                "payload": {"remittanceId": remittance_id, "status": status},
+            }
+            save_pending_operator_action(sender, action)
+            return (
+                f"Voy a cambiar la remesa #{remittance_id} a “{status}”. "
+                "¿Confirmas? Responde Sí o No."
+            )
+
     package_action = re.search(
         r"(?:marca|cambia)\s+(?:el\s+)?(?:paquete\s+)?([a-z0-9-]{6,})\s+(?:como|a)\s+(.+)$",
         clean,
@@ -671,7 +820,10 @@ def process_operator_message(
             "• listos para Cuba\n"
             "• compra para María, Amazon, 82.50\n"
             "• registra un pago de 50 para María\n"
-            "• marca 1Z... como Recibido"
+            "• marca 1Z... como Recibido\n"
+            "• crea cliente Pedro teléfono +1...\n"
+            "• asocia compra 12345 a María\n"
+            "• marca remesa 42 como Entregada"
         )
 
     answer = query_business(body)

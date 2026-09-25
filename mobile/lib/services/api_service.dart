@@ -157,7 +157,7 @@ class ApiService {
     }
   }
 
-  Future<bool> saveOcrRemittance({
+  Future<Map<String, dynamic>> saveOcrRemittance({
     required int noteId,
     required String source,
     required String name,
@@ -166,7 +166,7 @@ class ApiService {
     required String ocrText,
   }) async {
     final url = await baseUrl;
-    if (url.isEmpty) return false;
+    if (url.isEmpty) return const <String, dynamic>{};
     try {
       final response = await http.post(
         Uri.parse('$url/api/remittances/ocr'),
@@ -180,9 +180,135 @@ class ApiService {
           'ocr_text': ocrText,
         }),
       ).timeout(const Duration(seconds: 12));
-      return response.statusCode == 200;
+      if (response.statusCode != 200) return const <String, dynamic>{};
+      final decoded = jsonDecode(response.body);
+      return decoded is Map
+          ? Map<String, dynamic>.from(decoded)
+          : const <String, dynamic>{};
+    } catch (_) {
+      return const <String, dynamic>{};
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> getConversations({int limit = 100}) async {
+    final url = await baseUrl;
+    if (url.isEmpty) return const <Map<String, dynamic>>[];
+    try {
+      final uri = Uri.parse('$url/api/conversations').replace(
+        queryParameters: {'limit': limit.clamp(1, 300).toString()},
+      );
+      final r = await http
+          .get(uri, headers: await _headers())
+          .timeout(const Duration(seconds: 12));
+      if (r.statusCode != 200) return const <Map<String, dynamic>>[];
+      final decoded = jsonDecode(r.body);
+      if (decoded is! List) return const <Map<String, dynamic>>[];
+      return decoded
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+    } catch (_) {
+      return const <Map<String, dynamic>>[];
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> getConversationMessages(
+    String sender, {
+    int limit = 100,
+  }) async {
+    final url = await baseUrl;
+    if (url.isEmpty) return const <Map<String, dynamic>>[];
+    try {
+      final safeSender = Uri.encodeComponent(normalizePhone(sender));
+      final uri = Uri.parse('$url/api/conversations/$safeSender').replace(
+        queryParameters: {'limit': limit.clamp(1, 300).toString()},
+      );
+      final r = await http
+          .get(uri, headers: await _headers())
+          .timeout(const Duration(seconds: 12));
+      if (r.statusCode != 200) return const <Map<String, dynamic>>[];
+      final decoded = jsonDecode(r.body);
+      if (decoded is! List) return const <Map<String, dynamic>>[];
+      return decoded
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+    } catch (_) {
+      return const <Map<String, dynamic>>[];
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> getActivity({int limit = 100}) async {
+    final url = await baseUrl;
+    if (url.isEmpty) return const <Map<String, dynamic>>[];
+    try {
+      final uri = Uri.parse('$url/api/activity').replace(
+        queryParameters: {'limit': limit.clamp(1, 300).toString()},
+      );
+      final r = await http
+          .get(uri, headers: await _headers())
+          .timeout(const Duration(seconds: 12));
+      if (r.statusCode != 200) return const <Map<String, dynamic>>[];
+      final decoded = jsonDecode(r.body);
+      if (decoded is! List) return const <Map<String, dynamic>>[];
+      return decoded
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+    } catch (_) {
+      return const <Map<String, dynamic>>[];
+    }
+  }
+
+  Future<bool> recordOcrCorrection({
+    required String source,
+    required String field,
+    required String original,
+    required String corrected,
+  }) async {
+    if (original.trim().isEmpty ||
+        corrected.trim().isEmpty ||
+        original.trim() == corrected.trim()) {
+      return false;
+    }
+    final url = await baseUrl;
+    if (url.isEmpty) return false;
+    try {
+      final r = await http.post(
+        Uri.parse('$url/api/ocr/corrections'),
+        headers: await _headers(),
+        body: jsonEncode({
+          'source': source,
+          'field': field,
+          'original': original,
+          'corrected': corrected,
+        }),
+      ).timeout(const Duration(seconds: 10));
+      return r.statusCode == 200;
     } catch (_) {
       return false;
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> getOcrCorrections(String source) async {
+    final url = await baseUrl;
+    if (url.isEmpty) return const <Map<String, dynamic>>[];
+    try {
+      final uri = Uri.parse('$url/api/ocr/corrections').replace(
+        queryParameters: {'source': source},
+      );
+      final r = await http
+          .get(uri, headers: await _headers())
+          .timeout(const Duration(seconds: 10));
+      if (r.statusCode != 200) return const <Map<String, dynamic>>[];
+      final decoded = jsonDecode(r.body);
+      if (decoded is! List) return const <Map<String, dynamic>>[];
+      return decoded
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+    } catch (_) {
+      return const <Map<String, dynamic>>[];
     }
   }
 

@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from assistant_features import log_activity
+
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "whatsbot.db"
@@ -54,6 +56,9 @@ def init_schema() -> None:
                 received_at TEXT NOT NULL,
                 raw_text TEXT NOT NULL DEFAULT '',
                 source_key TEXT NOT NULL UNIQUE,
+                dedupe_fingerprint TEXT NOT NULL DEFAULT '',
+                duplicate_of INTEGER,
+                status TEXT NOT NULL DEFAULT 'Pendiente',
                 note_id INTEGER,
                 created_at TEXT NOT NULL
             );
@@ -64,6 +69,26 @@ def init_schema() -> None:
                 authenticated_at TEXT NOT NULL
             );
             """
+        )
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(remittances)").fetchall()
+        }
+        if "dedupe_fingerprint" not in columns:
+            conn.execute(
+                "ALTER TABLE remittances ADD COLUMN dedupe_fingerprint TEXT NOT NULL DEFAULT ''"
+            )
+        if "duplicate_of" not in columns:
+            conn.execute(
+                "ALTER TABLE remittances ADD COLUMN duplicate_of INTEGER"
+            )
+        if "status" not in columns:
+            conn.execute(
+                "ALTER TABLE remittances ADD COLUMN status TEXT NOT NULL DEFAULT 'Pendiente'"
+            )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_remittance_dedupe "
+            "ON remittances(dedupe_fingerprint)"
         )
         conn.execute(
             "INSERT OR IGNORE INTO config(key, value) VALUES('remittance_agents', '[]')"
@@ -223,6 +248,51 @@ def _display_date(received_at: str) -> str:
     return local.strftime("%m/%d/%Y %I:%M %p")
 
 
+def _dedupe_fingerprint(name: str, cents: int, received_at: str) -> str:
+    normalized = normalize_person_name(name)
+    if not normalized or cents <= 0:
+        return ""
+    try:
+        parsed = datetime.fromisoformat((received_at or "").replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        day = parsed.astimezone(REMIt_TZ).date().isoformat()
+    except Exception:
+        day = ""
+    if not day:
+        return ""
+    return hashlib.sha256(
+        f"{normalized}|{cents}|{day}".encode("utf-8")
+    ).hexdigest()
+
+
+def _duplicate_by_fingerprint(
+    conn: sqlite3.Connection,
+    fingerprint: str,
+    *,
+    exclude_source_key: str = "",
+) -> sqlite3.Row | None:
+    if not fingerprint:
+        return None
+    if exclude_source_key:
+        return conn.execute(
+            """
+            SELECT * FROM remittances
+            WHERE dedupe_fingerprint = ? AND source_key != ?
+            ORDER BY id ASC LIMIT 1
+            """,
+            (fingerprint, exclude_source_key),
+        ).fetchone()
+    return conn.execute(
+        """
+        SELECT * FROM remittances
+        WHERE dedupe_fingerprint = ?
+        ORDER BY id ASC LIMIT 1
+        """,
+        (fingerprint,),
+    ).fetchone()
+
+
 def ingest_bofa_sms(text: str, received_at: str, sms_id: str = "") -> dict[str, Any] | None:
     parsed = parse_bofa_sms(text)
     if parsed is None:
@@ -235,6 +305,7 @@ def ingest_bofa_sms(text: str, received_at: str, sms_id: str = "") -> dict[str, 
     amount_text = "$" + f"{cents / 100:.2f}"
     date_text = _display_date(received_at)
     content = f"Nombre: {name}\nMonto: {amount_text}\nFecha: {date_text}"
+    fingerprint = _dedupe_fingerprint(name, cents, received_at)
 
     with closing(db()) as conn:
         existing = conn.execute(
@@ -248,6 +319,33 @@ def ingest_bofa_sms(text: str, received_at: str, sms_id: str = "") -> dict[str, 
                 "amount": existing["amount_cents"] / 100,
                 "received_at": existing["received_at"],
                 "duplicate": True,
+                "duplicate_of": existing["id"],
+            }
+
+        duplicate = _duplicate_by_fingerprint(
+            conn,
+            fingerprint,
+            exclude_source_key=stable_key,
+        )
+        if duplicate is not None:
+            log_activity(
+                "remittance_duplicate",
+                status="blocked",
+                detail={
+                    "source": "bofa_sms",
+                    "duplicate_of": duplicate["id"],
+                    "name": name,
+                    "amount": cents / 100,
+                },
+            )
+            return {
+                "id": duplicate["id"],
+                "name": duplicate["sender_name"],
+                "amount": duplicate["amount_cents"] / 100,
+                "received_at": duplicate["received_at"],
+                "duplicate": True,
+                "duplicate_of": duplicate["id"],
+                "duplicate_reason": "same_name_amount_day",
             }
 
         cur = conn.execute(
@@ -270,8 +368,8 @@ def ingest_bofa_sms(text: str, received_at: str, sms_id: str = "") -> dict[str, 
             """
             INSERT INTO remittances(
                 sender_name, normalized_name, amount_cents, source, received_at,
-                raw_text, source_key, note_id, created_at
-            ) VALUES (?, ?, ?, 'bofa_sms', ?, ?, ?, ?, ?)
+                raw_text, source_key, dedupe_fingerprint, note_id, created_at
+            ) VALUES (?, ?, ?, 'bofa_sms', ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
@@ -280,6 +378,7 @@ def ingest_bofa_sms(text: str, received_at: str, sms_id: str = "") -> dict[str, 
                 received_at,
                 text,
                 stable_key,
+                fingerprint,
                 note_id,
                 utc_now(),
             ),
@@ -373,6 +472,7 @@ def ingest_paypal_email(
     amount_text = "$" + f"{cents / 100:.2f}"
     content = f"Nombre: {name}\nMonto: {amount_text}\nFecha: {display_date}"
     raw = "\n".join(x for x in [subject, body] if x).strip()
+    fingerprint = _dedupe_fingerprint(name, cents, stored_at)
 
     with closing(db()) as conn:
         existing = conn.execute(
@@ -386,6 +486,33 @@ def ingest_paypal_email(
                 "amount": existing["amount_cents"] / 100,
                 "received_at": existing["received_at"],
                 "duplicate": True,
+                "duplicate_of": existing["id"],
+            }
+
+        duplicate = _duplicate_by_fingerprint(
+            conn,
+            fingerprint,
+            exclude_source_key=stable_key,
+        )
+        if duplicate is not None:
+            log_activity(
+                "remittance_duplicate",
+                status="blocked",
+                detail={
+                    "source": "paypal_email",
+                    "duplicate_of": duplicate["id"],
+                    "name": name,
+                    "amount": cents / 100,
+                },
+            )
+            return {
+                "id": duplicate["id"],
+                "name": duplicate["sender_name"],
+                "amount": duplicate["amount_cents"] / 100,
+                "received_at": duplicate["received_at"],
+                "duplicate": True,
+                "duplicate_of": duplicate["id"],
+                "duplicate_reason": "same_name_amount_day",
             }
 
         cur = conn.execute(
@@ -408,8 +535,8 @@ def ingest_paypal_email(
             """
             INSERT INTO remittances(
                 sender_name, normalized_name, amount_cents, source, received_at,
-                raw_text, source_key, note_id, created_at
-            ) VALUES (?, ?, ?, 'paypal_email', ?, ?, ?, ?, ?)
+                raw_text, source_key, dedupe_fingerprint, note_id, created_at
+            ) VALUES (?, ?, ?, 'paypal_email', ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
@@ -418,6 +545,7 @@ def ingest_paypal_email(
                 stored_at,
                 raw,
                 stable_key,
+                fingerprint,
                 note_id,
                 utc_now(),
             ),
@@ -472,6 +600,7 @@ def upsert_ocr_remittance(
             received_at = local.astimezone(timezone.utc).isoformat()
             display_date = local.strftime("%m/%d/%Y")
 
+    fingerprint = _dedupe_fingerprint(clean_name, cents, received_at)
     amount_text = "$" + f"{cents / 100:.2f}" if cents > 0 else ""
     source_label = "PayPal" if source_clean == "paypal" else "Zelle"
     lines = [f"Origen: {source_label}"]
@@ -512,13 +641,60 @@ def upsert_ocr_remittance(
             "SELECT id FROM remittances WHERE source_key = ?",
             (source_key,),
         ).fetchone()
+        duplicate = _duplicate_by_fingerprint(
+            conn,
+            fingerprint,
+            exclude_source_key=source_key,
+        )
+        if existing is None and duplicate is not None:
+            if note_id > 0:
+                duplicate_content = content + (
+                    f"\nPosible duplicado de remesa #{duplicate['id']}."
+                )
+                conn.execute(
+                    """
+                    UPDATE notes
+                    SET title = ?, content = ?, original_text = ?, tags = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        title + " · DUPLICADO",
+                        duplicate_content,
+                        duplicate_content,
+                        json.dumps(["remesa", "ocr", source_clean, "duplicado"]),
+                        note_id,
+                    ),
+                )
+            conn.commit()
+            log_activity(
+                "remittance_duplicate",
+                status="blocked",
+                note_id=note_id if note_id > 0 else None,
+                detail={
+                    "source": f"ocr_{source_clean}",
+                    "duplicate_of": duplicate["id"],
+                    "name": clean_name,
+                    "amount": cents / 100,
+                },
+            )
+            return {
+                "id": int(duplicate["id"]),
+                "note_id": note_id,
+                "source": source_clean,
+                "name": clean_name,
+                "amount": cents / 100,
+                "date": display_date,
+                "duplicate": True,
+                "duplicate_of": int(duplicate["id"]),
+                "duplicate_reason": "same_name_amount_day",
+            }
         if existing is None:
             cur = conn.execute(
                 """
                 INSERT INTO remittances(
                     sender_name, normalized_name, amount_cents, source, received_at,
-                    raw_text, source_key, note_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    raw_text, source_key, dedupe_fingerprint, note_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     clean_name,
@@ -528,6 +704,7 @@ def upsert_ocr_remittance(
                     received_at,
                     ocr_text,
                     source_key,
+                    fingerprint,
                     note_id if note_id > 0 else None,
                     utc_now(),
                 ),
@@ -539,7 +716,8 @@ def upsert_ocr_remittance(
                 """
                 UPDATE remittances
                 SET sender_name = ?, normalized_name = ?, amount_cents = ?,
-                    source = ?, received_at = ?, raw_text = ?, note_id = ?
+                    source = ?, received_at = ?, raw_text = ?,
+                    dedupe_fingerprint = ?, note_id = ?
                 WHERE id = ?
                 """,
                 (
@@ -549,6 +727,7 @@ def upsert_ocr_remittance(
                     f"ocr_{source_clean}",
                     received_at,
                     ocr_text,
+                    fingerprint,
                     note_id if note_id > 0 else None,
                     remittance_id,
                 ),
@@ -562,7 +741,38 @@ def upsert_ocr_remittance(
         "name": clean_name,
         "amount": cents / 100,
         "date": display_date,
+        "duplicate": False,
+        "duplicate_of": None,
     }
+
+def set_remittance_status(remittance_id: int, status: str) -> bool:
+    allowed = {"Pendiente", "Identificada", "Entregada", "Liquidada"}
+    clean_status = str(status or "").strip()
+    if clean_status not in allowed:
+        return False
+    with closing(db()) as conn:
+        cur = conn.execute(
+            "UPDATE remittances SET status = ? WHERE id = ?",
+            (clean_status, int(remittance_id)),
+        )
+        if cur.rowcount:
+            row = conn.execute(
+                "SELECT note_id FROM remittances WHERE id = ?",
+                (int(remittance_id),),
+            ).fetchone()
+            if row is not None and row["note_id"]:
+                conn.execute(
+                    "UPDATE notes SET status = ? WHERE id = ?",
+                    (clean_status.lower(), row["note_id"]),
+                )
+        conn.commit()
+    if cur.rowcount:
+        log_activity(
+            "remittance_status",
+            detail={"remittance_id": int(remittance_id), "status": clean_status},
+        )
+    return cur.rowcount > 0
+
 
 def _parse_agent_query(text: str) -> tuple[str, int] | None:
     raw = " ".join((text or "").split())
