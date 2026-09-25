@@ -131,6 +131,16 @@ class KnowledgePipeline {
         KnowledgePipelineProgress(done, candidates.length, note.title),
       );
 
+      if (note.messageType == 'remittance') {
+        // Remittance notes are already structured as name, amount and date.
+        // Do not run generic entity extraction over them.
+        done++;
+        onProgress?.call(
+          KnowledgePipelineProgress(done, candidates.length, note.title),
+        );
+        continue;
+      }
+
       OcrPurchaseResult? imageResult;
       if (note.messageType == 'image') {
         try {
