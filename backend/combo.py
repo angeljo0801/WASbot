@@ -634,13 +634,20 @@ def process_operator_message(
     clean = clean_text(body)
 
     create_client_action = re.search(
-        r"(?:crea|crear|agrega|añade)\s+(?:un\s+)?cliente\s+(?:llamado\s+|que\s+se\s+llama\s+)?(.+?)(?:\s+(?:telefono|tel|phone)\s*[:#-]?\s*([+\d ()-]{7,}))?$",
+        r"(?:crea|crear|agrega|añade)\s+(?:un\s+)?cliente\s+(?:llamado\s+|que\s+se\s+llama\s+)?(.+)$",
         body.strip(),
         flags=re.IGNORECASE,
     )
     if create_client_action:
-        name = " ".join((create_client_action.group(1) or "").split()).strip(" ,.-")
-        phone = normalize_phone(create_client_action.group(2) or "")
+        raw_client = " ".join((create_client_action.group(1) or "").split()).strip()
+        phone_match = re.search(
+            r"\s+(?:telefono|tel|phone)\s*[:#-]?\s*([+\d ()-]{7,})$",
+            raw_client,
+            flags=re.IGNORECASE,
+        )
+        phone = normalize_phone(phone_match.group(1) if phone_match else "")
+        name_raw = raw_client[:phone_match.start()] if phone_match else raw_client
+        name = name_raw.strip(" ,.-")
         if name:
             action = {
                 "action_type": "create_client",
