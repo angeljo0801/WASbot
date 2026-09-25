@@ -1134,19 +1134,8 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
                     "WHATSAPP_CONTACT "
                     f"sender={masked_sender} clients_saved={count}"
                 )
-                response = MessagingResponse()
-                if count == 1:
-                    response.message("Contacto guardado como cliente.")
-                else:
-                    response.message(
-                        f"{count} contactos guardados como clientes."
-                    )
-                print(
-                    "WHATSAPP_DIAG "
-                    f"reply=twiml kind=contacts sender={masked_sender}"
-                )
                 return Response(
-                    content=str(response),
+                    content=str(MessagingResponse()),
                     media_type="application/xml",
                 )
 
@@ -1238,17 +1227,8 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
         conn.commit()
 
     response = MessagingResponse()
-    if ACK_ENABLED or operator:
+    if ACK_ENABLED:
         response.message("Nota guardada.")
-        print(
-            "WHATSAPP_DIAG "
-            f"reply=twiml kind=ack sender={masked_sender}"
-        )
-    else:
-        print(
-            "WHATSAPP_DIAG "
-            f"reply=none kind=saved_note sender={masked_sender}"
-        )
     return Response(content=str(response), media_type="application/xml")
 
 
