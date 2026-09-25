@@ -44,7 +44,8 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
   bool smsPermission = false;
   bool remittanceBusy = false;
   bool paypalNotificationAccess = false;
-  String photoFolderLabel = '';
+  String purchasePhotoFolderLabel = '';
+  String remittancePhotoFolderLabel = '';
   bool photoFolderBusy = false;
 
   @override
@@ -79,7 +80,10 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
     final background = await WhatsBotBackgroundService.preferenceEnabled();
     final smsAllowed = await remittanceSms.hasPermission();
     final paypalAllowed = await payPalEmail.hasAccess();
-    final photoFolder = await photoStorage.selectedFolder();
+    final purchasePhotoFolder =
+        await photoStorage.selectedFolder(PhotoFolderKind.purchases);
+    final remittancePhotoFolder =
+        await photoStorage.selectedFolder(PhotoFolderKind.remittances);
     if (!mounted) return;
     setState(() {
       url.text = s['url'] ?? '';
@@ -97,7 +101,8 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
       remittanceCodeDate = (remittance['code_date'] ?? '').toString();
       smsPermission = smsAllowed;
       paypalNotificationAccess = paypalAllowed;
-      photoFolderLabel = photoFolder?.label ?? '';
+      purchasePhotoFolderLabel = purchasePhotoFolder?.label ?? '';
+      remittancePhotoFolderLabel = remittancePhotoFolder?.label ?? '';
       backgroundEnabled = background;
       loading = false;
     });
@@ -271,48 +276,63 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
     );
   }
 
-  Future<void> choosePhotoFolder() async {
+  String _photoFolderLabel(PhotoFolderKind kind) =>
+      kind == PhotoFolderKind.purchases
+          ? purchasePhotoFolderLabel
+          : remittancePhotoFolderLabel;
+
+  void _setPhotoFolderLabel(PhotoFolderKind kind, String value) {
+    if (kind == PhotoFolderKind.purchases) {
+      purchasePhotoFolderLabel = value;
+    } else {
+      remittancePhotoFolderLabel = value;
+    }
+  }
+
+  Future<void> choosePhotoFolder(PhotoFolderKind kind) async {
     if (photoFolderBusy) return;
     setState(() => photoFolderBusy = true);
-    final selected = await photoStorage.selectFolder();
+    final selected = await photoStorage.selectFolder(kind);
     if (!mounted) return;
     setState(() {
       photoFolderBusy = false;
       if (selected != null) {
-        photoFolderLabel = selected.label;
+        _setPhotoFolderLabel(kind, selected.label);
       }
     });
     if (selected != null) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'Las fotos nuevas se guardarán también en “${selected.label}”.',
+            'Las fotos de ${kind.label} se guardarán en “${selected.label}”.',
           ),
         ),
       );
     }
   }
 
-  Future<void> clearPhotoFolder() async {
+  Future<void> clearPhotoFolder(PhotoFolderKind kind) async {
     if (photoFolderBusy) return;
     setState(() => photoFolderBusy = true);
-    await photoStorage.clearFolder();
+    await photoStorage.clearFolder(kind);
     if (!mounted) return;
     setState(() {
       photoFolderBusy = false;
-      photoFolderLabel = '';
+      _setPhotoFolderLabel(kind, '');
     });
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
+      SnackBar(
         content: Text(
-          'WhatsBot dejó de copiar fotos al almacenamiento compartido.',
+          'WhatsBot dejó de copiar fotos de ${kind.label} al almacenamiento compartido.',
         ),
       ),
     );
   }
 
-  Widget photoFolderCard() {
-    final selected = photoFolderLabel.trim().isNotEmpty;
+  Widget photoFolderCard(PhotoFolderKind kind) {
+    final folderLabel = _photoFolderLabel(kind);
+    final selected = folderLabel.trim().isNotEmpty;
+    final isPurchases = kind == PhotoFolderKind.purchases;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -321,11 +341,15 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
           children: [
             Row(
               children: [
-                const Icon(Icons.folder_copy_outlined),
+                Icon(
+                  isPurchases
+                      ? Icons.shopping_bag_outlined
+                      : Icons.payments_outlined,
+                ),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    'Carpeta de fotos',
+                    'Carpeta de ${kind.label}',
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                 ),
@@ -334,8 +358,8 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
             const SizedBox(height: 8),
             Text(
               selected
-                  ? 'Carpeta actual: $photoFolderLabel'
-                  : 'Elige una carpeta del almacenamiento. WhatsBot conservará su copia interna para OCR y además guardará allí las fotos nuevas.',
+                  ? 'Carpeta actual: $folderLabel'
+                  : 'Elige una carpeta exclusiva para las fotos de ${kind.label.toLowerCase()}.',
             ),
             const SizedBox(height: 12),
             Wrap(
@@ -343,7 +367,8 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
               runSpacing: 10,
               children: [
                 FilledButton.icon(
-                  onPressed: photoFolderBusy ? null : choosePhotoFolder,
+                  onPressed:
+                      photoFolderBusy ? null : () => choosePhotoFolder(kind),
                   icon: photoFolderBusy
                       ? const SizedBox.square(
                           dimension: 18,
@@ -356,15 +381,18 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                 ),
                 if (selected)
                   OutlinedButton.icon(
-                    onPressed: photoFolderBusy ? null : clearPhotoFolder,
+                    onPressed:
+                        photoFolderBusy ? null : () => clearPhotoFolder(kind),
                     icon: const Icon(Icons.link_off_outlined),
                     label: const Text('Dejar de usarla'),
                   ),
               ],
             ),
             const SizedBox(height: 8),
-            const Text(
-              'Incluye imágenes recibidas por WhatsApp y fotos añadidas a compras. Android recordará el acceso a la carpeta elegida.',
+            Text(
+              isPurchases
+                  ? 'Aquí se guardan las fotos reconocidas como compras y las fotos que añadas manualmente a una compra.'
+                  : 'Aquí se guardan las capturas reconocidas como remesas, como Zelle o PayPal.',
             ),
           ],
         ),
@@ -678,7 +706,9 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                     const SizedBox(height: 12),
                     comboCard(),
                     const SizedBox(height: 12),
-                    photoFolderCard(),
+                    photoFolderCard(PhotoFolderKind.purchases),
+                    const SizedBox(height: 12),
+                    photoFolderCard(PhotoFolderKind.remittances),
                     const SizedBox(height: 12),
                     Card(
                       child: ListTile(

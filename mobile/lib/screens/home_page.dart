@@ -16,7 +16,6 @@ import '../services/knowledge_store.dart';
 import '../services/note_share_service.dart';
 import '../services/remittance_sms_service.dart';
 import '../services/paypal_email_notification_service.dart';
-import '../services/photo_storage_service.dart';
 import 'ai_activity_page.dart';
 import 'ai_settings_page.dart';
 import 'combo_page.dart';
@@ -74,7 +73,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       <String, Future<Uint8List?>>{};
   final remittanceSms = RemittanceSmsService();
   final payPalEmail = PayPalEmailNotificationService();
-  final photoStorage = PhotoStorageService.instance;
 
   @override
   void initState() {
@@ -130,7 +128,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       final latest = await api.getNotes();
       notes = latest;
-      await photoStorage.archiveIncomingNotes(notes, api, limit: 20);
       await _runPostRefreshIntelligence();
 
       if (mounted) {
@@ -167,12 +164,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await remittanceSms.syncPending(api);
       await payPalEmail.syncPending(api);
       notes = await api.getNotes(query: search.text, category: category);
-      unawaited(() async {
-        final allNotes = search.text.trim().isEmpty && category == 'Todas'
-            ? notes
-            : await api.getNotes();
-        await photoStorage.archiveIncomingNotes(allNotes, api, limit: 20);
-      }());
     } catch (e) {
       error = 'Configura el servidor para comenzar. $e';
     } finally {
