@@ -19,6 +19,9 @@ class PurchaseDraft {
   final List<String> warnings;
   final String mediaPath;
   final String status;
+  final String draftType;
+  final String remittanceSource;
+  final String remittanceDate;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -41,6 +44,9 @@ class PurchaseDraft {
     required this.warnings,
     required this.mediaPath,
     required this.status,
+    this.draftType = 'purchase',
+    this.remittanceSource = '',
+    this.remittanceDate = '',
     required this.createdAt,
     required this.updatedAt,
   });
@@ -64,6 +70,9 @@ class PurchaseDraft {
     List<String>? warnings,
     String? mediaPath,
     String? status,
+    String? draftType,
+    String? remittanceSource,
+    String? remittanceDate,
     DateTime? updatedAt,
   }) => PurchaseDraft(
         id: id,
@@ -84,6 +93,9 @@ class PurchaseDraft {
         warnings: warnings ?? this.warnings,
         mediaPath: mediaPath ?? this.mediaPath,
         status: status ?? this.status,
+        draftType: draftType ?? this.draftType,
+        remittanceSource: remittanceSource ?? this.remittanceSource,
+        remittanceDate: remittanceDate ?? this.remittanceDate,
         createdAt: createdAt,
         updatedAt: updatedAt ?? DateTime.now(),
       );
@@ -107,6 +119,9 @@ class PurchaseDraft {
         'warnings': warnings,
         'media_path': mediaPath,
         'status': status,
+        'draft_type': draftType,
+        'remittance_source': remittanceSource,
+        'remittance_date': remittanceDate,
         'created_at': createdAt.toIso8601String(),
         'updated_at': updatedAt.toIso8601String(),
       };
@@ -135,6 +150,9 @@ class PurchaseDraft {
             .toList(),
         mediaPath: (json['media_path'] ?? '').toString(),
         status: (json['status'] ?? 'pending').toString(),
+        draftType: (json['draft_type'] ?? 'purchase').toString(),
+        remittanceSource: (json['remittance_source'] ?? '').toString(),
+        remittanceDate: (json['remittance_date'] ?? '').toString(),
         createdAt: DateTime.tryParse((json['created_at'] ?? '').toString()) ??
             DateTime.now(),
         updatedAt: DateTime.tryParse((json['updated_at'] ?? '').toString()) ??
