@@ -100,7 +100,8 @@ class RemittanceOcrParser {
     if (upper.contains('TRANSACTION DATE')) score += 1;
     if (upper.contains('GO TO PAYPAL')) score += 2;
     if (upper.contains('PAYPAL DEBIT')) score += 1;
-    if (upper.contains('MONEY RECEIVED')) score += 2;
+    if (upper.contains('MONEY RECEIVED')) score += 3;
+    if (upper.contains('PAYMENT RECEIVED')) score += 3;
     if (RegExp(r'(?:YOU\s+RECEIVED|RECEIVED)\s+\$[0-9]', caseSensitive: false)
         .hasMatch(upper)) {
       score += 3;
@@ -158,7 +159,10 @@ class RemittanceOcrParser {
       caseSensitive: false,
     ).firstMatch(joined);
     if (received != null) return _toMoney(received.group(1));
-    return _labeledAmount(lines, const ['AMOUNT', 'MONTO', 'CANTIDAD']);
+    return _labeledAmount(
+      lines,
+      const ['AMOUNT', 'MONTO', 'CANTIDAD', 'GROSS AMOUNT'],
+    );
   }
 
   static double _zelleAmount(List<String> lines, String joined) {
