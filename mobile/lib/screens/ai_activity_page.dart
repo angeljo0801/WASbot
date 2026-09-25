@@ -41,6 +41,9 @@ class _AiActivityPageState extends State<AiActivityPage> {
         'client_identity' => 'Cliente identificado',
         'clients_unified' => 'Clientes sincronizados',
         'ocr_correction' => 'Corrección OCR aprendida',
+        'twilio_status' => 'Estado de entrega de Twilio',
+        'client_created' => 'Cliente creado',
+        'remittance_status' => 'Estado de remesa actualizado',
         _ => type.replaceAll('_', ' '),
       };
 
@@ -52,6 +55,9 @@ class _AiActivityPageState extends State<AiActivityPage> {
         'client_identity' => Icons.person_search_outlined,
         'clients_unified' => Icons.sync_outlined,
         'ocr_correction' => Icons.school_outlined,
+        'twilio_status' => Icons.mark_chat_read_outlined,
+        'client_created' => Icons.person_add_alt_1_outlined,
+        'remittance_status' => Icons.payments_outlined,
         _ => Icons.info_outline,
       };
 
