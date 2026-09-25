@@ -89,7 +89,7 @@ Go to PayPal
   });
 
   test('detects PayPal you-received-from variant', () {
-    final parsed = RemittanceOcrParser.parse('''
+    final parsed = RemittanceOcrParser.parse(r'''
 PayPal
 Transaction details
 You received $84.25 USD from Carlos Perez
@@ -105,7 +105,7 @@ September 24, 2026
   });
 
   test('detects PayPal payment-received-from variant', () {
-    final parsed = RemittanceOcrParser.parse('''
+    final parsed = RemittanceOcrParser.parse(r'''
 PayPal
 Payment received from Maria Lopez
 Amount
