@@ -438,6 +438,7 @@ class AiProviderService {
       'Documentos',
       'Recordatorios',
       'Fotos',
+      'Remesas',
     };
     final requestedCategory = (data['category'] ?? note.category).toString();
     final category = note.messageType == 'contact'
