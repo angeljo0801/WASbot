@@ -654,11 +654,12 @@ def upsert_ocr_remittance(
                 conn.execute(
                     """
                     UPDATE notes
-                    SET title = ?, content = ?, tags = ?
+                    SET title = ?, content = ?, original_text = ?, tags = ?
                     WHERE id = ?
                     """,
                     (
                         title + " · DUPLICADO",
+                        duplicate_content,
                         duplicate_content,
                         json.dumps(["remesa", "ocr", source_clean, "duplicado"]),
                         note_id,
