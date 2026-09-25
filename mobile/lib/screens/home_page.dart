@@ -286,13 +286,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       for (final note in pending) {
         if (note.sender.trim().isEmpty ||
             note.messageType != 'text' ||
-            note.replyStatus == 'sent') {
+            note.replyStatus == 'sent' ||
+            note.replyStatus == 'handled') {
           continue;
         }
 
         final rawMessage = note.originalText.trim().isNotEmpty
             ? note.originalText
             : note.content;
+
         OcrCorrectionApplyResult? correction;
         try {
           correction = await knowledge.ocr.applyNaturalLanguageCorrection(
@@ -301,12 +303,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           );
         } catch (_) {}
 
+        if (correction == null && aiAvailable) {
+          try {
+            final interpreted = await ai.interpretOcrCorrection(rawMessage);
+            if (interpreted != null) {
+              correction = await knowledge.ocr.applyCorrection(
+                interpreted,
+                note,
+              );
+            }
+          } catch (_) {}
+        }
+
         if (correction != null) {
-          final sent = await api.sendAiReply(
+          final handled = await api.markWhatsappHandled(
             noteId: note.id,
-            body: correction.confirmation,
+            reason: correction.updatedCount > 0
+                ? 'ocr_correction_applied'
+                : 'ocr_correction_understood_no_target',
           );
-          if (!sent) break;
+          if (!handled) break;
           continue;
         }
 
@@ -319,14 +335,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           noteId: note.id,
           body: reply,
         );
-        if (!sent) {
-          // Avoid hammering Twilio if the current send path is unavailable.
-          break;
-        }
+        if (!sent) break;
       }
     } catch (_) {
-      // Keep the backend item pending. A later foreground/background tick
-      // retries after the model, storage, or Twilio becomes available again.
+      // Pending items retry on a later foreground/background tick.
     } finally {
       _replyTickRunning = false;
     }
