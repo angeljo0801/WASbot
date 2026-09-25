@@ -7,17 +7,30 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/note.dart';
 import 'api_service.dart';
 
+enum PhotoFolderKind {
+  purchases('purchases', 'Compras'),
+  remittances('remittances', 'Remesas');
+
+  final String wireValue;
+  final String label;
+
+  const PhotoFolderKind(this.wireValue, this.label);
+}
+
 class PhotoFolderInfo {
+  final String kind;
   final String uri;
   final String label;
 
   const PhotoFolderInfo({
+    required this.kind,
     required this.uri,
     required this.label,
   });
 
   factory PhotoFolderInfo.fromMap(Map<dynamic, dynamic> map) {
     return PhotoFolderInfo(
+      kind: (map['kind'] ?? '').toString(),
       uri: (map['uri'] ?? '').toString(),
       label: (map['label'] ?? 'Carpeta seleccionada').toString(),
     );
@@ -54,25 +67,34 @@ class PhotoStorageService {
 
   static const String _archivePrefix = 'photo_storage_archived_note_';
 
-  Future<PhotoFolderInfo?> selectedFolder() async {
+  Future<PhotoFolderInfo?> selectedFolder(PhotoFolderKind kind) async {
     try {
-      final raw = await _channel.invokeMethod<dynamic>('getFolder');
+      final raw = await _channel.invokeMethod<dynamic>(
+        'getFolder',
+        <String, dynamic>{'kind': kind.wireValue},
+      );
       if (raw is Map) return PhotoFolderInfo.fromMap(raw);
     } catch (_) {}
     return null;
   }
 
-  Future<PhotoFolderInfo?> selectFolder() async {
+  Future<PhotoFolderInfo?> selectFolder(PhotoFolderKind kind) async {
     try {
-      final raw = await _channel.invokeMethod<dynamic>('selectFolder');
+      final raw = await _channel.invokeMethod<dynamic>(
+        'selectFolder',
+        <String, dynamic>{'kind': kind.wireValue},
+      );
       if (raw is Map) return PhotoFolderInfo.fromMap(raw);
     } catch (_) {}
     return null;
   }
 
-  Future<void> clearFolder() async {
+  Future<void> clearFolder(PhotoFolderKind kind) async {
     try {
-      await _channel.invokeMethod<void>('clearFolder');
+      await _channel.invokeMethod<void>(
+        'clearFolder',
+        <String, dynamic>{'kind': kind.wireValue},
+      );
     } catch (_) {}
   }
 
@@ -105,15 +127,17 @@ class PhotoStorageService {
 
   Future<PhotoSaveResult?> saveBytes(
     Uint8List bytes, {
+    required PhotoFolderKind kind,
     required String fileName,
     required String mimeType,
     bool overwrite = true,
   }) async {
-    if (bytes.isEmpty || await selectedFolder() == null) return null;
+    if (bytes.isEmpty || await selectedFolder(kind) == null) return null;
     try {
       final raw = await _channel.invokeMethod<dynamic>(
         'writeImage',
         <String, dynamic>{
+          'kind': kind.wireValue,
           'fileName': fileName,
           'mimeType': mimeType,
           'bytes': bytes,
@@ -127,6 +151,7 @@ class PhotoStorageService {
 
   Future<PhotoSaveResult?> saveLocalFile(
     String path, {
+    required PhotoFolderKind kind,
     String prefix = 'WhatsBot',
     bool overwrite = false,
   }) async {
@@ -142,13 +167,24 @@ class PhotoStorageService {
         : original;
     return saveBytes(
       bytes,
+      kind: kind,
       fileName: name,
       mimeType: _mimeForExtension(ext),
       overwrite: overwrite,
     );
   }
 
-  Future<Uint8List?> _bytesForNote(Note note, ApiService api) async {
+  Future<Uint8List?> _bytesForNote(
+    Note note,
+    ApiService api, {
+    String? localPath,
+  }) async {
+    final explicit = (localPath ?? '').trim();
+    if (explicit.isNotEmpty) {
+      final file = File(explicit);
+      if (await file.exists()) return file.readAsBytes();
+    }
+
     final raw = (note.mediaPath ?? '').trim();
     if (raw.isEmpty) {
       for (final path in note.photoPaths) {
@@ -160,11 +196,10 @@ class PhotoStorageService {
 
     final local = File(raw);
     if (await local.exists()) return local.readAsBytes();
-
     return api.fetchMediaBytes(raw);
   }
 
-  String _incomingFileName(Note note) {
+  String _classifiedFileName(Note note, PhotoFolderKind kind) {
     final raw = (note.mediaPath ?? '').trim();
     final ext = _extension(raw);
     final identity = note.messageSid.trim().isNotEmpty
@@ -172,33 +207,41 @@ class PhotoStorageService {
         : note.id.toString();
     final safeIdentity =
         identity.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_').take(48);
-    return 'WhatsApp_${_dateStamp(note.createdAt)}_$safeIdentity$ext';
+    final prefix =
+        kind == PhotoFolderKind.remittances ? 'Remesa' : 'Compra';
+    return '${prefix}_${_dateStamp(note.createdAt)}_$safeIdentity$ext';
   }
 
-  Future<bool> archiveIncomingNote(
+  Future<bool> archiveClassifiedNote(
     Note note,
     ApiService api, {
-    PhotoFolderInfo? folder,
+    required PhotoFolderKind kind,
+    String? localPath,
   }) async {
     if (note.messageType != 'image') return false;
-    final selected = folder ?? await selectedFolder();
+    final selected = await selectedFolder(kind);
     if (selected == null) return false;
 
     final prefs = await SharedPreferences.getInstance();
     final identity = note.messageSid.trim().isNotEmpty
         ? note.messageSid
         : note.id.toString();
-    final key = '$_archivePrefix$identity';
+    final key = '$_archivePrefix${kind.wireValue}_$identity';
     final archived = prefs.getString(key) ?? '';
     if (archived.startsWith('${selected.uri}|')) return false;
 
-    final bytes = await _bytesForNote(note, api);
+    final bytes = await _bytesForNote(note, api, localPath: localPath);
     if (bytes == null || bytes.isEmpty) return false;
 
-    final ext = _extension((note.mediaPath ?? '').trim());
+    final ext = _extension(
+      (localPath ?? '').trim().isNotEmpty
+          ? localPath!
+          : (note.mediaPath ?? '').trim(),
+    );
     final saved = await saveBytes(
       bytes,
-      fileName: _incomingFileName(note),
+      kind: kind,
+      fileName: _classifiedFileName(note, kind),
       mimeType: _mimeForExtension(ext),
       overwrite: true,
     );
@@ -206,29 +249,6 @@ class PhotoStorageService {
 
     await prefs.setString(key, '${selected.uri}|${saved.uri}');
     return true;
-  }
-
-  Future<int> archiveIncomingNotes(
-    Iterable<Note> notes,
-    ApiService api, {
-    int limit = 20,
-  }) async {
-    final folder = await selectedFolder();
-    if (folder == null) return 0;
-
-    var saved = 0;
-    var examined = 0;
-    for (final note in notes) {
-      if (saved >= limit || examined >= 100) break;
-      if (note.messageType != 'image') continue;
-      examined++;
-      try {
-        if (await archiveIncomingNote(note, api, folder: folder)) saved++;
-      } catch (_) {
-        // A later refresh retries the same photo.
-      }
-    }
-    return saved;
   }
 }
 
