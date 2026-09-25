@@ -71,6 +71,7 @@ class _NewNotePageState extends State<NewNotePage> {
     await source.copy(target.path);
     await PhotoStorageService.instance.saveLocalFile(
       target.path,
+      kind: PhotoFolderKind.purchases,
       prefix: 'Compra',
       overwrite: false,
     );
