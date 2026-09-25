@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../services/api_service.dart';
 import '../services/paqueteria_purchase_sync_service.dart';
+import '../services/photo_storage_service.dart';
 
 class NewNotePage extends StatefulWidget {
   final ApiService api;
@@ -68,6 +69,11 @@ class _NewNotePageState extends State<NewNotePage> {
       '${folder.path}/purchase_${DateTime.now().microsecondsSinceEpoch}_${photoPaths.length}$extension',
     );
     await source.copy(target.path);
+    await PhotoStorageService.instance.saveLocalFile(
+      target.path,
+      prefix: 'Compra',
+      overwrite: false,
+    );
     return target.path;
   }
 

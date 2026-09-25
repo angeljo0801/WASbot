@@ -68,6 +68,7 @@ jobs:
           cp ../.github/WhatsBotSmsBridge.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotSmsBridge.kt
           cp ../.github/WhatsBotPayPalNotificationListener.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotPayPalNotificationListener.kt
           cp ../.github/WhatsBotPayPalEmailBridge.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotPayPalEmailBridge.kt
+          cp ../.github/WhatsBotPhotoStorageBridge.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotPhotoStorageBridge.kt
 
           normalize_secret() {
             local name="$1"
@@ -292,7 +293,7 @@ jobs:
       - name: Build stable release APK
         working-directory: mobile
         run: |
-          flutter build apk --release --target-platform android-arm64 --build-name 0.12.1 --build-number "$GITHUB_RUN_NUMBER"
+          flutter build apk --release --target-platform android-arm64 --build-name 0.13.0 --build-number "$GITHUB_RUN_NUMBER"
 
       - name: Verify APK signature
         working-directory: mobile
@@ -303,7 +304,7 @@ jobs:
           "$APKSIGNER" verify --verbose build/app/outputs/flutter-apk/app-release.apk
           {
             echo "applicationId=com.whatsbot.whatsbot"
-            echo "versionName=0.12.1"
+            echo "versionName=0.13.0"
             echo "buildNumber=$GITHUB_RUN_NUMBER"
             echo "signing=persistent"
             echo "backups=Downloads/WhatsBot"
@@ -312,7 +313,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: WhatsBot-v0.12.1-Business-Assistant-APK
+          name: WhatsBot-v0.13.0-Photo-Folder-APK
           path: |
             mobile/build/app/outputs/flutter-apk/app-release.apk
             mobile/build/app/outputs/flutter-apk/BUILD_IDENTITY.txt
