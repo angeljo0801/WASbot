@@ -132,6 +132,45 @@ paypal_duplicate = remittances.ingest_paypal_email(
     'paypal-test-1',
 )
 assert paypal_duplicate is not None and paypal_duplicate['duplicate'] is True
+with remittances.db() as conn:
+    note_cursor = conn.execute(
+        """
+        INSERT INTO notes(
+            title, content, original_text, category, tags, source,
+            message_type, status, ai_source, created_at
+        ) VALUES ('Imagen', '[Imagen recibida]', '[Imagen recibida]', 'Inbox',
+                  '[]', 'whatsapp', 'image', 'ready', 'rules', ?)
+        """,
+        (remittances.utc_now(),),
+    )
+    ocr_note_id = int(note_cursor.lastrowid)
+    conn.commit()
+
+ocr_note = remittances.upsert_ocr_remittance(
+    note_id=ocr_note_id,
+    source='PayPal',
+    name='Alexandre Adam-tremblay',
+    amount=158.99,
+    date_text='09/23/2026',
+    ocr_text='Alexandre Adam-tremblay sent you $158.99 USD\nTransaction ID secret',
+)
+assert ocr_note['note_id'] == ocr_note_id
+
+with remittances.db() as conn:
+    updated_note = conn.execute(
+        'SELECT * FROM notes WHERE id = ?',
+        (ocr_note_id,),
+    ).fetchone()
+
+assert updated_note['category'] == 'Remesas'
+assert updated_note['title'] == 'Remesa · PayPal · $158.99'
+assert 'Origen: PayPal' in updated_note['content']
+assert 'Nombre: Alexandre Adam-tremblay' in updated_note['content']
+assert 'Monto: $158.99' in updated_note['content']
+assert 'Fecha: 09/23/2026' in updated_note['content']
+assert 'Transaction ID' not in updated_note['content']
+assert updated_note['original_text'] == updated_note['content']
+
 ocr_zelle = remittances.upsert_ocr_remittance(
     note_id=0,
     source='Zelle',
