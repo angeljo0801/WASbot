@@ -18,6 +18,15 @@ from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 
 from combo import router as combo_router, looks_like_purchase, pending_purchase, process_operator_message
+from remittances import (
+    ensure_daily_code,
+    get_agents as get_remittance_agents,
+    handle_agent_message as handle_remittance_agent_message,
+    ingest_bofa_sms,
+    is_agent as is_remittance_agent,
+    regenerate_code as regenerate_remittance_code,
+    set_agents as set_remittance_agents,
+)
 
 
 APP_API_KEY = os.getenv("APP_API_KEY", "dev-mobile-key").strip()
@@ -167,11 +176,13 @@ def get_config(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
             allowed = json.loads(raw.get("allowed_senders", "[]"))
         except Exception:
             allowed = []
+        remittance_agents = get_remittance_agents()
         return {
             "processing_mode": raw.get("processing_mode", "local"),
             "whatsapp_provider": raw.get("whatsapp_provider", "twilio"),
             "bot_number": raw.get("bot_number", normalize_phone(TWILIO_WHATSAPP_FROM)),
             "allowed_senders": allowed,
+            "remittance_agents": remittance_agents,
             "whatsapp_connected": bool(
                 TWILIO_ACCOUNT_SID
                 and TWILIO_API_KEY_SID
@@ -571,6 +582,16 @@ class ConfigUpdate(BaseModel):
     allowed_senders: list[str] = Field(default_factory=list)
 
 
+class RemittanceAgentsUpdate(BaseModel):
+    agents: list[str] = Field(default_factory=list)
+
+
+class RemittanceSmsCreate(BaseModel):
+    text: str
+    received_at: str = ""
+    sms_id: str = ""
+
+
 class NoteCreate(BaseModel):
     title: str
     content: str = ""
@@ -666,6 +687,51 @@ def api_config_put(payload: ConfigUpdate) -> dict[str, Any]:
             )
         conn.commit()
     return get_config()
+
+
+@app.get("/api/remittances/settings", dependencies=[Depends(require_api_key)])
+def remittance_settings() -> dict[str, Any]:
+    code, code_date = ensure_daily_code()
+    return {
+        "agents": get_remittance_agents(),
+        "daily_code": code,
+        "code_date": code_date,
+    }
+
+
+@app.put("/api/remittances/agents", dependencies=[Depends(require_api_key)])
+def remittance_agents_update(payload: RemittanceAgentsUpdate) -> dict[str, Any]:
+    agents = set_remittance_agents(payload.agents)
+    code, code_date = ensure_daily_code()
+    return {
+        "agents": agents,
+        "daily_code": code,
+        "code_date": code_date,
+    }
+
+
+@app.post("/api/remittances/code/regenerate", dependencies=[Depends(require_api_key)])
+def remittance_code_regenerate() -> dict[str, Any]:
+    code, code_date = regenerate_remittance_code()
+    return {
+        "daily_code": code,
+        "code_date": code_date,
+    }
+
+
+@app.post("/api/remittances/sms", status_code=201, dependencies=[Depends(require_api_key)])
+def remittance_sms_create(payload: RemittanceSmsCreate) -> dict[str, Any]:
+    saved = ingest_bofa_sms(
+        payload.text,
+        payload.received_at or utc_now(),
+        payload.sms_id,
+    )
+    if saved is None:
+        raise HTTPException(
+            status_code=422,
+            detail="SMS does not match the Bank of America remittance format",
+        )
+    return saved
 
 
 @app.get("/api/notes", dependencies=[Depends(require_api_key)])
@@ -1036,6 +1102,7 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
     config = get_config()
     allowed_now = allowed_sender(sender, config)
     operator = operator_sender(sender, config)
+    remittance_agent = is_remittance_agent(sender)
     masked_sender = f"***{sender[-4:]}" if sender else "(empty)"
     masked_allowed = [
         f"***{normalize_phone(x)[-4:]}"
@@ -1045,10 +1112,15 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
     print(
         "WHATSAPP_DIAG "
         f"sender={masked_sender} allowed={allowed_now} operator={operator} "
-        f"allowed_list={masked_allowed}"
+        f"agent={remittance_agent} allowed_list={masked_allowed}"
     )
-    if not allowed_now:
+    if not allowed_now and not remittance_agent:
         return Response(content=str(MessagingResponse()), media_type="application/xml")
+
+    if remittance_agent:
+        response = MessagingResponse()
+        response.message(handle_remittance_agent_message(sender, body))
+        return Response(content=str(response), media_type="application/xml")
 
     # Only an explicitly authorized operator can create or query business data.
     pending_contacts = get_pending_contacts(sender) if operator else []

@@ -46,6 +46,92 @@ class ApiService {
     return digits.isEmpty ? '' : '+$digits';
   }
 
+  Future<Map<String, dynamic>> remittanceSettings() async {
+    final url = await baseUrl;
+    if (url.isEmpty) return const <String, dynamic>{};
+    try {
+      final r = await http
+          .get(
+            Uri.parse('$url/api/remittances/settings'),
+            headers: await _headers(),
+          )
+          .timeout(const Duration(seconds: 10));
+      if (r.statusCode != 200) return const <String, dynamic>{};
+      final decoded = jsonDecode(r.body);
+      return decoded is Map
+          ? Map<String, dynamic>.from(decoded)
+          : const <String, dynamic>{};
+    } catch (_) {
+      return const <String, dynamic>{};
+    }
+  }
+
+  Future<Map<String, dynamic>> saveRemittanceAgents(
+    List<String> agents,
+  ) async {
+    final url = await baseUrl;
+    if (url.isEmpty) return const <String, dynamic>{};
+    final normalized = agents
+        .map(normalizePhone)
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .toList();
+    try {
+      final r = await http.put(
+        Uri.parse('$url/api/remittances/agents'),
+        headers: await _headers(),
+        body: jsonEncode({'agents': normalized}),
+      ).timeout(const Duration(seconds: 10));
+      if (r.statusCode != 200) return const <String, dynamic>{};
+      final decoded = jsonDecode(r.body);
+      return decoded is Map
+          ? Map<String, dynamic>.from(decoded)
+          : const <String, dynamic>{};
+    } catch (_) {
+      return const <String, dynamic>{};
+    }
+  }
+
+  Future<Map<String, dynamic>> regenerateRemittanceCode() async {
+    final url = await baseUrl;
+    if (url.isEmpty) return const <String, dynamic>{};
+    try {
+      final r = await http.post(
+        Uri.parse('$url/api/remittances/code/regenerate'),
+        headers: await _headers(),
+      ).timeout(const Duration(seconds: 10));
+      if (r.statusCode != 200) return const <String, dynamic>{};
+      final decoded = jsonDecode(r.body);
+      return decoded is Map
+          ? Map<String, dynamic>.from(decoded)
+          : const <String, dynamic>{};
+    } catch (_) {
+      return const <String, dynamic>{};
+    }
+  }
+
+  Future<bool> ingestRemittanceSms({
+    required String text,
+    required String receivedAt,
+    required String smsId,
+  }) async {
+    final url = await baseUrl;
+    if (url.isEmpty) return false;
+    try {
+      final r = await http.post(
+        Uri.parse('$url/api/remittances/sms'),
+        headers: await _headers(),
+        body: jsonEncode({
+          'text': text,
+          'received_at': receivedAt,
+          'sms_id': smsId,
+        }),
+      ).timeout(const Duration(seconds: 12));
+      return r.statusCode == 200 || r.statusCode == 201;
+    } catch (_) {
+      return false;
+    }
+  }
   Future<List<Map<String, dynamic>>> getClients() async {
     final url = await baseUrl;
     if (url.isEmpty) return const <Map<String, dynamic>>[];

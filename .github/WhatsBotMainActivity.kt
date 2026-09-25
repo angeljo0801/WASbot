@@ -14,5 +14,20 @@ class MainActivity : FlutterActivity() {
             applicationContext,
             flutterEngine.dartExecutor.binaryMessenger
         )
+        WhatsBotSmsBridge.register(
+            this,
+            flutterEngine.dartExecutor.binaryMessenger
+        )
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        if (WhatsBotSmsBridge.onRequestPermissionsResult(requestCode, grantResults)) {
+            return
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     }
 }

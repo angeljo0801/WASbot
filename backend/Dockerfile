@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
 COPY combo.py .
+COPY remittances.py .
 COPY main.py .
 
 EXPOSE 8080
