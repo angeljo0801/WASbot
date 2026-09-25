@@ -14,5 +14,9 @@ class MainActivity : FlutterActivity() {
             applicationContext,
             flutterEngine.dartExecutor.binaryMessenger
         )
+        WhatsBotSmsBridge.register(
+            this,
+            flutterEngine.dartExecutor.binaryMessenger
+        )
     }
 }
