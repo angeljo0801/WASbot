@@ -1,6 +1,7 @@
 package com.whatsbot.whatsbot
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
@@ -50,7 +51,7 @@ object WhatsBotPhotoStorageBridge {
         }
     }
 
-    private fun prefs() = activity!!.getSharedPreferences(PREFS, Activity.MODE_PRIVATE)
+    private fun prefs() = activity!!.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     private fun currentFolder(): Map<String, Any?>? {
         val raw = prefs().getString(KEY_URI, "") ?: ""
@@ -99,13 +100,14 @@ object WhatsBotPhotoStorageBridge {
             return true
         }
 
-        val uri = data?.data
+        val returnedIntent = data
+        val uri = returnedIntent?.data
         if (uri == null) {
             result.success(null)
             return true
         }
 
-        val flags = data.flags and (
+        val flags = returnedIntent.flags and (
             Intent.FLAG_GRANT_READ_URI_PERMISSION or
                 Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             )
