@@ -33,13 +33,16 @@ class OcrPurchaseService {
   String? _learnedValue(
     List<Map<String, dynamic>> hints,
     String field,
-    String original,
-  ) {
+    String original, {
+    int minOccurrences = 1,
+  }) {
     final clean = original.trim();
     if (clean.isEmpty) return null;
     for (final hint in hints) {
       if ((hint['field_name'] ?? '').toString() != field) continue;
       if ((hint['original_value'] ?? '').toString().trim() != clean) continue;
+      final occurrences = (hint['occurrences'] as num?)?.toInt() ?? 0;
+      if (occurrences < minOccurrences) continue;
       final corrected = (hint['corrected_value'] ?? '').toString().trim();
       if (corrected.isNotEmpty) return corrected;
     }
@@ -476,6 +479,7 @@ class OcrPurchaseService {
       clientHints,
       'customer_name',
       customerResolution['name'] ?? '',
+      minOccurrences: 2,
     );
     if (learnedCustomer != null) {
       customerResolution['name'] = learnedCustomer;
