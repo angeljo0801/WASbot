@@ -712,10 +712,21 @@ def create_note(payload: NoteCreate) -> dict[str, Any]:
 
 @app.patch("/api/notes/{note_id}", dependencies=[Depends(require_api_key)])
 def patch_note(note_id: int, payload: NotePatch) -> dict[str, Any]:
+    with closing(db()) as lookup:
+        existing = lookup.execute(
+            "SELECT message_type FROM notes WHERE id = ?",
+            (note_id,),
+        ).fetchone()
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    is_contact = existing["message_type"] == "contact"
+
     fields: list[str] = []
     values: list[Any] = []
     for key in ("title", "content", "category", "status", "ai_source"):
         value = getattr(payload, key)
+        if key == "category" and value is not None and is_contact:
+            value = "Clientes"
         if value is not None:
             fields.append(f"{key} = ?")
             values.append(value)
