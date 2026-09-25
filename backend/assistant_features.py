@@ -350,6 +350,79 @@ def remember_client_alias(
     return True
 
 
+def upsert_local_client(name: str, phone: str = "") -> dict[str, Any]:
+    clean_name = " ".join(str(name or "").split()).strip()
+    clean_phone = normalize_phone(phone)
+    if not clean_name and not clean_phone:
+        raise ValueError("Client name or phone is required")
+    identity = clean_phone or normalize_name(clean_name).replace(" ", "-")
+    external_id = "whatsbot-client-" + identity.lstrip("+")
+    now = utc_now()
+    with closing(db()) as conn:
+        existing = None
+        if clean_phone:
+            existing = conn.execute(
+                "SELECT * FROM client_sync WHERE phone = ? ORDER BY id LIMIT 1",
+                (clean_phone,),
+            ).fetchone()
+        if existing is None:
+            existing = conn.execute(
+                "SELECT * FROM client_sync WHERE external_id = ?",
+                (external_id,),
+            ).fetchone()
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO client_sync(
+                    external_id, name, phone, source, created_at, updated_at
+                ) VALUES (?, ?, ?, 'whatsbot_action', ?, ?)
+                """,
+                (external_id, clean_name, clean_phone, now, now),
+            )
+        else:
+            external_id = existing["external_id"]
+            conn.execute(
+                """
+                UPDATE client_sync
+                SET name = ?, phone = ?, source = 'whatsbot_action', updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    clean_name or existing["name"],
+                    clean_phone or existing["phone"],
+                    now,
+                    existing["id"],
+                ),
+            )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM client_sync WHERE external_id = ?",
+            (external_id,),
+        ).fetchone()
+    remember_client_alias(
+        external_id,
+        row["name"],
+        "name",
+        row["name"],
+        source="whatsbot_action",
+    )
+    if row["phone"]:
+        remember_client_alias(
+            external_id,
+            row["name"],
+            "phone",
+            row["phone"],
+            source="whatsbot_action",
+        )
+    result = {
+        "external_id": external_id,
+        "name": row["name"],
+        "phone": row["phone"],
+    }
+    log_activity("client_created", detail=result)
+    return result
+
+
 def resolve_client(sender: str) -> dict[str, Any] | None:
     phone = normalize_phone(sender)
     if not phone:
