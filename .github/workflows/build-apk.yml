@@ -265,6 +265,10 @@ jobs:
         working-directory: mobile
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
+      - name: Test remittance OCR rules
+        working-directory: mobile
+        run: flutter test test/remittance_ocr_test.dart
+
       - name: Verify persistent signing secrets
         env:
           WHATSBOT_KEYSTORE_B64: ${{ secrets.WHATSBOT_KEYSTORE_B64 }}
