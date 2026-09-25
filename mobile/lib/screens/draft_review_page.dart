@@ -528,6 +528,7 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
   @override
   Widget build(BuildContext context) {
     final d = widget.draft;
+    final attachments = _attachmentPaths;
     final confidence = (d.confidence * 100).round();
     return Scaffold(
       appBar: AppBar(title: const Text('Borrador para Paquetería')),
@@ -544,57 +545,111 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
                 ),
               ),
             ),
-            if (d.mediaPath.isNotEmpty && File(d.mediaPath).existsSync()) ...[
+            if (attachments.isNotEmpty) ...[
               const SizedBox(height: 10),
-              Semantics(
-                button: true,
-                label: 'Abrir foto del OCR a pantalla completa',
-                child: InkWell(
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      attachments.length == 1
+                          ? 'Foto adjunta'
+                          : 'Fotos adjuntas (${attachments.length})',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ),
+                  if (attachmentOcrWorking)
+                    const SizedBox.square(
+                      dimension: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              if (attachments.length == 1)
+                InkWell(
                   borderRadius: BorderRadius.circular(14),
-                  onTap: () => _openOcrImage(d.mediaPath),
-                  child: Stack(
-                    alignment: Alignment.bottomCenter,
-                    children: [
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(14),
-                        child: SizedBox(
-                          width: double.infinity,
-                          height: 240,
-                          child: Image.file(
-                            File(d.mediaPath),
-                            fit: BoxFit.contain,
+                  onTap: () => _openOcrImage(attachments.first),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(14),
+                    child: SizedBox(
+                      width: double.infinity,
+                      height: 240,
+                      child: Image.file(
+                        File(attachments.first),
+                        fit: BoxFit.contain,
+                      ),
+                    ),
+                  ),
+                )
+              else
+                SizedBox(
+                  height: 230,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: attachments.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 10),
+                    itemBuilder: (context, index) {
+                      final path = attachments[index];
+                      final selected = selectedOcrPath == path;
+                      return SizedBox(
+                        width: 180,
+                        child: Card(
+                          clipBehavior: Clip.antiAlias,
+                          child: Column(
+                            children: [
+                              Expanded(
+                                child: InkWell(
+                                  onTap: () => _openOcrImage(path),
+                                  child: Stack(
+                                    fit: StackFit.expand,
+                                    children: [
+                                      Image.file(
+                                        File(path),
+                                        fit: BoxFit.contain,
+                                      ),
+                                      if (selected)
+                                        const Align(
+                                          alignment: Alignment.topRight,
+                                          child: Padding(
+                                            padding: EdgeInsets.all(8),
+                                            child: Icon(
+                                              Icons.check_circle,
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              SizedBox(
+                                width: double.infinity,
+                                child: TextButton.icon(
+                                  onPressed: attachmentOcrWorking
+                                      ? null
+                                      : () => _useAttachmentForOcr(path),
+                                  icon: const Icon(
+                                    Icons.document_scanner_outlined,
+                                  ),
+                                  label: Text(
+                                    selected
+                                        ? 'OCR seleccionado'
+                                        : 'Usar para OCR',
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ),
-                      Container(
-                        margin: const EdgeInsets.only(bottom: 10),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 7,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withValues(alpha: 0.68),
-                          borderRadius: BorderRadius.circular(18),
-                        ),
-                        child: const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.zoom_in_outlined,
-                              color: Colors.white,
-                              size: 18,
-                            ),
-                            SizedBox(width: 6),
-                            Text(
-                              'Toca para ampliar',
-                              style: TextStyle(color: Colors.white),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
+                      );
+                    },
                   ),
                 ),
+              const SizedBox(height: 6),
+              Text(
+                attachments.length == 1
+                    ? 'Toca la imagen para verla en grande.'
+                    : 'Toca una imagen para verla en grande o usa “Usar para OCR” para analizar esa foto.',
+                style: Theme.of(context).textTheme.bodySmall,
               ),
             ],
             const SizedBox(height: 14),
