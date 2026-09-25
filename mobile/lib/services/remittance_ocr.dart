@@ -342,7 +342,7 @@ class RemittanceOcrParser {
 
   static String _cleanName(String raw) => raw
       .replaceAll(RegExp(r'^[^A-Za-zÀ-ÿ]+'), '')
-      .replaceAll(RegExp(r"[^A-Za-zÀ-ÿ .\\-']+$"), '')
+      .replaceAll(RegExp(r"[^A-Za-zÀ-ÿ .'-]+$"), '')
       .replaceAll(RegExp(r'\s+'), ' ')
       .trim();
 

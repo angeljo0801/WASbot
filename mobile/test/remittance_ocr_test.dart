@@ -3,7 +3,7 @@ import 'package:whatsbot/services/remittance_ocr.dart';
 
 void main() {
   test('detects Zelle payment detail without inventing sender name', () {
-    final parsed = RemittanceOcrParser.parse('''
+    final parsed = RemittanceOcrParser.parse(r'''
 Success
 Your payment is sent
 To
@@ -28,7 +28,7 @@ efhbxtu3g
   });
 
   test('detects BECU Zelle sent screen', () {
-    final parsed = RemittanceOcrParser.parse('''
+    final parsed = RemittanceOcrParser.parse(r'''
 Zelle
 BECU
 Payment Sent
@@ -48,7 +48,7 @@ All Done
   });
 
   test('detects Spanish Zelle confirmation', () {
-    final parsed = RemittanceOcrParser.parse('''
+    final parsed = RemittanceOcrParser.parse(r'''
 ¡Listo! Enviaste $145.00 a Angel Escobedo Loreta.
 El dinero generalmente estará disponible en unos minutos.
 Enviado a
@@ -69,7 +69,7 @@ Enviar otro pago
   });
 
   test('detects PayPal sender amount and transaction date', () {
-    final parsed = RemittanceOcrParser.parse('''
+    final parsed = RemittanceOcrParser.parse(r'''
 PayPal
 Alexandre Adam-tremblay sent you $158.99 USD
 Amount
@@ -89,7 +89,7 @@ Go to PayPal
   });
 
   test('does not classify a normal purchase screenshot as remittance', () {
-    final parsed = RemittanceOcrParser.parse('''
+    final parsed = RemittanceOcrParser.parse(r'''
 Amazon
 Order total: $42.15
 Ship to
