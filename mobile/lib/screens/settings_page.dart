@@ -7,6 +7,7 @@ import '../services/api_service.dart';
 import '../services/background_service.dart';
 import '../services/remittance_sms_service.dart';
 import '../services/paypal_email_notification_service.dart';
+import '../services/photo_storage_service.dart';
 import 'backup_page.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -25,6 +26,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
   final newRemittanceAgent = TextEditingController();
   final remittanceSms = RemittanceSmsService();
   final payPalEmail = PayPalEmailNotificationService();
+  final photoStorage = PhotoStorageService.instance;
 
   String provider = 'twilio';
   List<String> allowedNumbers = [];
@@ -42,6 +44,8 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
   bool smsPermission = false;
   bool remittanceBusy = false;
   bool paypalNotificationAccess = false;
+  String photoFolderLabel = '';
+  bool photoFolderBusy = false;
 
   @override
   void initState() {
@@ -75,6 +79,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
     final background = await WhatsBotBackgroundService.preferenceEnabled();
     final smsAllowed = await remittanceSms.hasPermission();
     final paypalAllowed = await payPalEmail.hasAccess();
+    final photoFolder = await photoStorage.selectedFolder();
     if (!mounted) return;
     setState(() {
       url.text = s['url'] ?? '';
@@ -92,6 +97,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
       remittanceCodeDate = (remittance['code_date'] ?? '').toString();
       smsPermission = smsAllowed;
       paypalNotificationAccess = paypalAllowed;
+      photoFolderLabel = photoFolder?.label ?? '';
       backgroundEnabled = background;
       loading = false;
     });
@@ -260,6 +266,107 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
       const SnackBar(
         content: Text(
           'Activa WhatsBot en Acceso a notificaciones y vuelve a la app.',
+        ),
+      ),
+    );
+  }
+
+  Future<void> choosePhotoFolder() async {
+    if (photoFolderBusy) return;
+    setState(() => photoFolderBusy = true);
+    final selected = await photoStorage.selectFolder();
+    if (!mounted) return;
+    setState(() {
+      photoFolderBusy = false;
+      if (selected != null) {
+        photoFolderLabel = selected.label;
+      }
+    });
+    if (selected != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Las fotos nuevas se guardarán también en “${selected.label}”.',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> clearPhotoFolder() async {
+    if (photoFolderBusy) return;
+    setState(() => photoFolderBusy = true);
+    await photoStorage.clearFolder();
+    if (!mounted) return;
+    setState(() {
+      photoFolderBusy = false;
+      photoFolderLabel = '';
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'WhatsBot dejó de copiar fotos al almacenamiento compartido.',
+        ),
+      ),
+    );
+  }
+
+  Widget photoFolderCard() {
+    final selected = photoFolderLabel.trim().isNotEmpty;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.folder_copy_outlined),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Carpeta de fotos',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              selected
+                  ? 'Carpeta actual: $photoFolderLabel'
+                  : 'Elige una carpeta del almacenamiento. WhatsBot conservará su copia interna para OCR y además guardará allí las fotos nuevas.',
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                FilledButton.icon(
+                  onPressed: photoFolderBusy ? null : choosePhotoFolder,
+                  icon: photoFolderBusy
+                      ? const SizedBox.square(
+                          dimension: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.create_new_folder_outlined),
+                  label: Text(
+                    selected ? 'Cambiar carpeta' : 'Elegir carpeta',
+                  ),
+                ),
+                if (selected)
+                  OutlinedButton.icon(
+                    onPressed: photoFolderBusy ? null : clearPhotoFolder,
+                    icon: const Icon(Icons.link_off_outlined),
+                    label: const Text('Dejar de usarla'),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Incluye imágenes recibidas por WhatsApp y fotos añadidas a compras. Android recordará el acceso a la carpeta elegida.',
+            ),
+          ],
         ),
       ),
     );
@@ -570,6 +677,8 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                     statusCard(),
                     const SizedBox(height: 12),
                     comboCard(),
+                    const SizedBox(height: 12),
+                    photoFolderCard(),
                     const SizedBox(height: 12),
                     Card(
                       child: ListTile(
