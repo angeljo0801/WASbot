@@ -39,6 +39,7 @@ class _NewNotePageState extends State<NewNotePage> {
     'Documentos',
     'Recordatorios',
     'Fotos',
+    'Remesas',
   ];
 
   @override
