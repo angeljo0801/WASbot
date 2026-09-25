@@ -1134,8 +1134,19 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
                     "WHATSAPP_CONTACT "
                     f"sender={masked_sender} clients_saved={count}"
                 )
+                response = MessagingResponse()
+                if count == 1:
+                    response.message("Contacto guardado como cliente.")
+                else:
+                    response.message(
+                        f"{count} contactos guardados como clientes."
+                    )
+                print(
+                    "WHATSAPP_DIAG "
+                    f"reply=twiml kind=contacts sender={masked_sender}"
+                )
                 return Response(
-                    content=str(MessagingResponse()),
+                    content=str(response),
                     media_type="application/xml",
                 )
 
@@ -1164,21 +1175,16 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
             message_sid,
         )
         if combo_reply:
-            print(f"WHATSAPP_DIAG reply=combo sender={masked_sender}")
-            try:
-                send_whatsapp_direct(sender, combo_reply)
-                return Response(
-                    content=str(MessagingResponse()),
-                    media_type="application/xml",
-                )
-            except Exception as exc:
-                print(
-                    "WHATSAPP_DIAG direct_send_failed "
-                    f"sender={masked_sender} error={type(exc).__name__}"
-                )
-                response = MessagingResponse()
-                response.message(combo_reply)
-                return Response(content=str(response), media_type="application/xml")
+            response = MessagingResponse()
+            response.message(combo_reply)
+            print(
+                "WHATSAPP_DIAG "
+                f"reply=twiml kind=combo sender={masked_sender}"
+            )
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
 
     media_type = infer_message_type(content_type, num_media)
     persisted_media = media_url
@@ -1232,8 +1238,17 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
         conn.commit()
 
     response = MessagingResponse()
-    if ACK_ENABLED:
+    if ACK_ENABLED or operator:
         response.message("Nota guardada.")
+        print(
+            "WHATSAPP_DIAG "
+            f"reply=twiml kind=ack sender={masked_sender}"
+        )
+    else:
+        print(
+            "WHATSAPP_DIAG "
+            f"reply=none kind=saved_note sender={masked_sender}"
+        )
     return Response(content=str(response), media_type="application/xml")
 
 
