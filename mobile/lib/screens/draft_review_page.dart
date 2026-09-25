@@ -40,6 +40,8 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
   String? clientHint;
   String selectedOcrPath = '';
   bool attachmentOcrWorking = false;
+  bool itemSelectionMode = false;
+  final Set<int> selectedItemIndices = <int>{};
 
   @override
   void initState() {
@@ -451,6 +453,85 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
     );
   }
 
+  void _toggleItemSelection(int index) {
+    if (index < 0 || index >= items.length) return;
+    setState(() {
+      if (selectedItemIndices.contains(index)) {
+        selectedItemIndices.remove(index);
+      } else {
+        selectedItemIndices.add(index);
+      }
+    });
+  }
+
+  void _setItemSelectionMode(bool enabled) {
+    setState(() {
+      itemSelectionMode = enabled;
+      if (!enabled) selectedItemIndices.clear();
+    });
+  }
+
+  Future<void> _deleteSelectedItems() async {
+    final valid = selectedItemIndices
+        .where((index) => index >= 0 && index < items.length)
+        .toList()
+      ..sort();
+    if (valid.isEmpty) return;
+
+    final count = valid.length;
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text(
+              count == 1
+                  ? 'Borrar artículo'
+                  : 'Borrar $count artículos',
+            ),
+            content: Text(
+              count == 1
+                  ? '¿Quieres borrar el artículo seleccionado de este borrador?'
+                  : '¿Quieres borrar los $count artículos seleccionados de este borrador?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancelar'),
+              ),
+              FilledButton.tonalIcon(
+                onPressed: () => Navigator.pop(context, true),
+                icon: const Icon(Icons.delete_sweep_outlined),
+                label: Text(count == 1 ? 'Borrar' : 'Borrar todos'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed || !mounted) return;
+
+    setState(() {
+      for (final index in valid.reversed) {
+        items.removeAt(index);
+      }
+      selectedItemIndices.clear();
+      itemSelectionMode = false;
+    });
+
+    final updated = _current();
+    await store.saveDraft(updated);
+    await store.syncOcrKeyEntities(updated);
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          count == 1
+              ? 'Artículo borrado.'
+              : '$count artículos borrados del borrador.',
+        ),
+      ),
+    );
+  }
+
   Future<void> _confirm() async {
     if (saving) return;
 
@@ -800,8 +881,43 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
                   ),
                 ),
                 Text('${items.length}'),
+                if (items.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  TextButton.icon(
+                    onPressed: saving
+                        ? null
+                        : () => _setItemSelectionMode(!itemSelectionMode),
+                    icon: Icon(
+                      itemSelectionMode
+                          ? Icons.close
+                          : Icons.checklist_outlined,
+                    ),
+                    label: Text(itemSelectionMode ? 'Cancelar' : 'Seleccionar'),
+                  ),
+                ],
               ],
             ),
+            if (itemSelectionMode && items.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      selectedItemIndices.isEmpty
+                          ? 'Selecciona los artículos que quieras borrar.'
+                          : '${selectedItemIndices.length} seleccionado(s)',
+                    ),
+                  ),
+                  FilledButton.tonalIcon(
+                    onPressed: selectedItemIndices.isEmpty || saving
+                        ? null
+                        : _deleteSelectedItems,
+                    icon: const Icon(Icons.delete_sweep_outlined),
+                    label: const Text('Borrar seleccionados'),
+                  ),
+                ],
+              ),
+            ],
             if (items.isEmpty)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 10),
@@ -810,26 +926,40 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
             for (var i = 0; i < items.length; i++)
               Card(
                 child: ListTile(
+                  onTap: itemSelectionMode
+                      ? () => _toggleItemSelection(i)
+                      : null,
+                  leading: itemSelectionMode
+                      ? Checkbox(
+                          value: selectedItemIndices.contains(i),
+                          onChanged: (_) => _toggleItemSelection(i),
+                        )
+                      : null,
                   title: Text((items[i]['name'] ?? 'Artículo').toString()),
                   subtitle: Text('x${items[i]['qty'] ?? 1}'),
-                  trailing: Wrap(
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      Text(
-                        '\$${((items[i]['price'] as num?)?.toDouble() ?? 0).toStringAsFixed(2)}',
-                      ),
-                      IconButton(
-                        tooltip: 'Editar artículo',
-                        onPressed: () => _editItem(i),
-                        icon: const Icon(Icons.edit_outlined),
-                      ),
-                      IconButton(
-                        tooltip: 'Borrar artículo',
-                        onPressed: saving ? null : () => _deleteItem(i),
-                        icon: const Icon(Icons.delete_outline),
-                      ),
-                    ],
-                  ),
+                  trailing: itemSelectionMode
+                      ? Text(
+                          '\${((items[i]['price'] as num?)?.toDouble() ?? 0).toStringAsFixed(2)}',
+                        )
+                      : Wrap(
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Text(
+                              '\${((items[i]['price'] as num?)?.toDouble() ?? 0).toStringAsFixed(2)}',
+                            ),
+                            IconButton(
+                              tooltip: 'Editar artículo',
+                              onPressed: () => _editItem(i),
+                              icon: const Icon(Icons.edit_outlined),
+                            ),
+                            IconButton(
+                              tooltip: 'Borrar artículo',
+                              onPressed:
+                                  saving ? null : () => _deleteItem(i),
+                              icon: const Icon(Icons.delete_outline),
+                            ),
+                          ],
+                        ),
                 ),
               ),
             if (d.warnings.isNotEmpty) ...[
