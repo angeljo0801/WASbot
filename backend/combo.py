@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import APIRouter, Body
 
 from assistant_features import log_activity, sync_snapshot_clients
+from remittances import set_remittance_status
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -579,6 +580,24 @@ def process_operator_message(
             clear_pending_operator_action(sender)
             return "Acción cancelada."
         if answer == "yes":
+            if pending_action.get("action_type") == "remittance_status":
+                payload = pending_action.get("payload") or {}
+                remittance_id = int(payload.get("remittanceId") or 0)
+                status = str(payload.get("status") or "")
+                ok = set_remittance_status(remittance_id, status)
+                log_activity(
+                    "business_action",
+                    status="completed" if ok else "failed",
+                    sender=sender,
+                    detail=pending_action,
+                )
+                clear_pending_operator_action(sender)
+                return (
+                    f"Remesa #{remittance_id} cambiada a “{status}”."
+                    if ok
+                    else "No pude encontrar esa remesa para actualizarla."
+                )
+
             action_id = enqueue_paqueteria_action(pending_action)
             log_activity(
                 "business_action",
