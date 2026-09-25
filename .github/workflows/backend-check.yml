@@ -17,4 +17,4 @@ jobs:
         with:
           python-version: '3.12'
       - name: Compile backend Python
-        run: python -m py_compile backend/app.py backend/main.py backend/combo.py
+        run: python -m py_compile backend/app.py backend/main.py backend/combo.py backend/remittances.py
