@@ -123,12 +123,20 @@ class PhotoStorageService {
   }
 
   Future<PhotoFolderInfo?> selectFolder(PhotoFolderKind kind) async {
+    final before = await selectedFolder(kind);
     try {
       final raw = await _channel.invokeMethod<dynamic>(
         'selectFolder',
         <String, dynamic>{'kind': kind.wireValue},
       );
-      if (raw is Map) return PhotoFolderInfo.fromMap(raw);
+      if (raw is Map) {
+        final selected = PhotoFolderInfo.fromMap(raw);
+        if (before?.uri != selected.uri) {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.remove(_pathMapKey(kind));
+        }
+        return selected;
+      }
     } catch (_) {}
     return null;
   }
@@ -140,6 +148,8 @@ class PhotoStorageService {
         <String, dynamic>{'kind': kind.wireValue},
       );
     } catch (_) {}
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_pathMapKey(kind));
   }
 
   String _extension(String raw) {
