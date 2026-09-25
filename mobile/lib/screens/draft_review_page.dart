@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import '../models/purchase_draft.dart';
 import '../services/api_service.dart';
 import '../services/knowledge_store.dart';
+import '../services/ocr_purchase_service.dart';
 import '../services/paqueteria_purchase_sync_service.dart';
+import '../services/photo_storage_service.dart';
 import 'fullscreen_image_viewer.dart';
 
 class DraftReviewPage extends StatefulWidget {
@@ -36,6 +38,8 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
   bool clientsLoading = true;
   bool ambiguityPrompted = false;
   String? clientHint;
+  String selectedOcrPath = '';
+  bool attachmentOcrWorking = false;
 
   @override
   void initState() {
@@ -50,6 +54,7 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
       text: d.total > 0 ? d.total.toStringAsFixed(2) : '',
     );
     items = d.items.map((e) => Map<String, dynamic>.from(e)).toList();
+    selectedOcrPath = d.mediaPath;
     WidgetsBinding.instance.addPostFrameCallback((_) => _loadClients());
   }
 
@@ -268,8 +273,70 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
         description: description.text.trim(),
         total: _money(total.text),
         items: items,
+        mediaPath: selectedOcrPath,
         status: status,
       );
+
+  List<String> get _attachmentPaths {
+    final paths = <String>[];
+    for (final path in widget.draft.attachmentPaths) {
+      if (path.trim().isNotEmpty &&
+          File(path).existsSync() &&
+          !paths.contains(path)) {
+        paths.add(path);
+      }
+    }
+    if (widget.draft.mediaPath.trim().isNotEmpty &&
+        File(widget.draft.mediaPath).existsSync() &&
+        !paths.contains(widget.draft.mediaPath)) {
+      paths.add(widget.draft.mediaPath);
+    }
+    return paths;
+  }
+
+  Future<void> _useAttachmentForOcr(String path) async {
+    if (attachmentOcrWorking) return;
+    setState(() {
+      attachmentOcrWorking = true;
+      selectedOcrPath = path;
+    });
+    try {
+      final result =
+          await OcrPurchaseService(api: widget.api).parseLocalPurchaseImage(path);
+      if (result == null) return;
+      final parsed = result.parsed;
+      setState(() {
+        if (parsed.store.trim().isNotEmpty &&
+            parsed.store != 'Otra tienda') {
+          shop.text = parsed.store;
+        }
+        if (parsed.orderNumber.trim().isNotEmpty) {
+          order.text = parsed.orderNumber;
+        }
+        if (parsed.total > 0) {
+          total.text = parsed.total.toStringAsFixed(2);
+        }
+        if (parsed.items.isNotEmpty) {
+          items = parsed.items
+              .map((item) => Map<String, dynamic>.from(item))
+              .toList();
+          description.text = parsed.items
+              .take(5)
+              .map((item) => (item['name'] ?? '').toString())
+              .where((value) => value.isNotEmpty)
+              .join(', ');
+        }
+      });
+      final updated = _current().copyWith(
+        ocrText: result.text,
+        attachmentPaths: _attachmentPaths,
+      );
+      await store.saveDraft(updated);
+      await store.syncOcrKeyEntities(updated);
+    } finally {
+      if (mounted) setState(() => attachmentOcrWorking = false);
+    }
+  }
 
   Future<void> _saveOnly() async {
     final draft = _current();
