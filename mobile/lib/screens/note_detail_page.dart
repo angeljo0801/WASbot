@@ -9,6 +9,7 @@ import '../models/note.dart';
 import '../models/purchase_draft.dart';
 import '../services/api_service.dart';
 import '../services/knowledge_store.dart';
+import '../services/note_share_service.dart';
 import '../services/ocr_purchase_service.dart';
 import 'draft_review_page.dart';
 
@@ -197,24 +198,7 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
   Future<void> shareNote() async {
     setState(() => working = true);
     try {
-      final local = await _localMedia();
-      final text = [
-        note.title,
-        if (note.content.trim().isNotEmpty) note.content,
-      ].join('\n\n');
-      if (local != null) {
-        await SharePlus.instance.share(
-          ShareParams(
-            text: text,
-            files: [XFile(local)],
-            subject: note.title,
-          ),
-        );
-      } else {
-        await SharePlus.instance.share(
-          ShareParams(text: text, subject: note.title),
-        );
-      }
+      await NoteShareService(widget.api).shareNotes([note]);
     } finally {
       if (mounted) setState(() => working = false);
     }
