@@ -88,6 +88,38 @@ Go to PayPal
     expect(parsed.date, '09/23/2026');
   });
 
+  test('detects PayPal you-received-from variant', () {
+    final parsed = RemittanceOcrParser.parse('''
+PayPal
+Transaction details
+You received $84.25 USD from Carlos Perez
+Transaction date
+September 24, 2026
+''');
+
+    expect(parsed.isRemittance, isTrue);
+    expect(parsed.source, 'PayPal');
+    expect(parsed.name, 'Carlos Perez');
+    expect(parsed.amount, 84.25);
+    expect(parsed.date, '09/24/2026');
+  });
+
+  test('detects PayPal payment-received-from variant', () {
+    final parsed = RemittanceOcrParser.parse('''
+PayPal
+Payment received from Maria Lopez
+Amount
+$72.00 USD
+Transaction ID
+ABC123
+''');
+
+    expect(parsed.isRemittance, isTrue);
+    expect(parsed.source, 'PayPal');
+    expect(parsed.name, 'Maria Lopez');
+    expect(parsed.amount, 72.00);
+  });
+
   test('does not classify a normal purchase screenshot as remittance', () {
     final parsed = RemittanceOcrParser.parse(r'''
 Amazon
