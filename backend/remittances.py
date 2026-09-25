@@ -58,6 +58,7 @@ def init_schema() -> None:
                 source_key TEXT NOT NULL UNIQUE,
                 dedupe_fingerprint TEXT NOT NULL DEFAULT '',
                 duplicate_of INTEGER,
+                status TEXT NOT NULL DEFAULT 'Pendiente',
                 note_id INTEGER,
                 created_at TEXT NOT NULL
             );
@@ -80,6 +81,10 @@ def init_schema() -> None:
         if "duplicate_of" not in columns:
             conn.execute(
                 "ALTER TABLE remittances ADD COLUMN duplicate_of INTEGER"
+            )
+        if "status" not in columns:
+            conn.execute(
+                "ALTER TABLE remittances ADD COLUMN status TEXT NOT NULL DEFAULT 'Pendiente'"
             )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_remittance_dedupe "
@@ -738,6 +743,35 @@ def upsert_ocr_remittance(
         "duplicate": False,
         "duplicate_of": None,
     }
+
+def set_remittance_status(remittance_id: int, status: str) -> bool:
+    allowed = {"Pendiente", "Identificada", "Entregada", "Liquidada"}
+    clean_status = str(status or "").strip()
+    if clean_status not in allowed:
+        return False
+    with closing(db()) as conn:
+        cur = conn.execute(
+            "UPDATE remittances SET status = ? WHERE id = ?",
+            (clean_status, int(remittance_id)),
+        )
+        if cur.rowcount:
+            row = conn.execute(
+                "SELECT note_id FROM remittances WHERE id = ?",
+                (int(remittance_id),),
+            ).fetchone()
+            if row is not None and row["note_id"]:
+                conn.execute(
+                    "UPDATE notes SET status = ? WHERE id = ?",
+                    (clean_status.lower(), row["note_id"]),
+                )
+        conn.commit()
+    if cur.rowcount:
+        log_activity(
+            "remittance_status",
+            detail={"remittance_id": int(remittance_id), "status": clean_status},
+        )
+    return cur.rowcount > 0
+
 
 def _parse_agent_query(text: str) -> tuple[str, int] | None:
     raw = " ".join((text or "").split())
