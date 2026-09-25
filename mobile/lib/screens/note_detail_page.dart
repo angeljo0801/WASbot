@@ -41,6 +41,7 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
     'Documentos',
     'Recordatorios',
     'Fotos',
+    'Remesas',
   ];
 
   late Note note;
@@ -111,6 +112,7 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
         'audio' => Icons.mic_none,
         'document' => Icons.description_outlined,
         'contact' => Icons.person_add_alt_1_outlined,
+        'remittance' => Icons.payments_outlined,
         _ => Icons.notes_outlined,
       };
 
