@@ -132,6 +132,31 @@ class ApiService {
       return false;
     }
   }
+  Future<bool> ingestPayPalRemittanceEmail({
+    required String subject,
+    required String body,
+    required String receivedAt,
+    required String emailId,
+  }) async {
+    final url = await baseUrl;
+    if (url.isEmpty) return false;
+    try {
+      final r = await http.post(
+        Uri.parse('$url/api/remittances/paypal-email'),
+        headers: await _headers(),
+        body: jsonEncode({
+          'subject': subject,
+          'body': body,
+          'received_at': receivedAt,
+          'email_id': emailId,
+        }),
+      ).timeout(const Duration(seconds: 12));
+      return r.statusCode == 200 || r.statusCode == 201;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<List<Map<String, dynamic>>> getClients() async {
     final url = await baseUrl;
     if (url.isEmpty) return const <Map<String, dynamic>>[];
