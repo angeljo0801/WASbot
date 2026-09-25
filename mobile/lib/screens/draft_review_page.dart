@@ -402,6 +402,55 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
     });
   }
 
+  Future<void> _deleteItem(int index) async {
+    if (index < 0 || index >= items.length) return;
+    final item = items[index];
+    final itemName = (item['name'] ?? 'Artículo').toString().trim();
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Borrar artículo'),
+            content: Text(
+              itemName.isEmpty
+                  ? '¿Quieres borrar este artículo detectado?'
+                  : '¿Quieres borrar “$itemName” de este borrador?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancelar'),
+              ),
+              FilledButton.tonalIcon(
+                onPressed: () => Navigator.pop(context, true),
+                icon: const Icon(Icons.delete_outline),
+                label: const Text('Borrar'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed || !mounted) return;
+
+    setState(() {
+      items.removeAt(index);
+    });
+
+    final updated = _current();
+    await store.saveDraft(updated);
+    await store.syncOcrKeyEntities(updated);
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          itemName.isEmpty
+              ? 'Artículo borrado.'
+              : '“$itemName” fue borrado del borrador.',
+        ),
+      ),
+    );
+  }
+
   Future<void> _confirm() async {
     if (saving) return;
 
@@ -770,8 +819,14 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
                         '\$${((items[i]['price'] as num?)?.toDouble() ?? 0).toStringAsFixed(2)}',
                       ),
                       IconButton(
+                        tooltip: 'Editar artículo',
                         onPressed: () => _editItem(i),
                         icon: const Icon(Icons.edit_outlined),
+                      ),
+                      IconButton(
+                        tooltip: 'Borrar artículo',
+                        onPressed: saving ? null : () => _deleteItem(i),
+                        icon: const Icon(Icons.delete_outline),
                       ),
                     ],
                   ),
