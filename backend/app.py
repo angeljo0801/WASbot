@@ -727,6 +727,10 @@ class AiReplyRequest(BaseModel):
     body: str
 
 
+class AiHandledRequest(BaseModel):
+    reason: str = "handled"
+
+
 class OcrCorrectionCreate(BaseModel):
     source: str
     field: str
@@ -1325,6 +1329,61 @@ def pending_ai_replies(limit: int = 10) -> list[dict[str, Any]]:
             item["business_context"] = business_context_for_sender(row["sender"])
             result.append(item)
         return result
+
+
+@app.post(
+    "/api/whatsapp/replies/{note_id}/handled",
+    dependencies=[Depends(require_api_key)],
+)
+def mark_whatsapp_message_handled(
+    note_id: int,
+    payload: AiHandledRequest,
+) -> dict[str, Any]:
+    reason = payload.reason.strip() or "handled"
+    with closing(db()) as conn:
+        row = conn.execute(
+            "SELECT * FROM notes WHERE id = ?",
+            (note_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Note not found")
+        if row["source"] != "whatsapp":
+            raise HTTPException(
+                status_code=400,
+                detail="Note is not an inbound WhatsApp message",
+            )
+        if (row["reply_status"] or "") == "sent":
+            return {
+                "ok": True,
+                "reply_status": "sent",
+                "already_sent": True,
+            }
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE notes
+            SET reply_status = 'handled',
+                reply_text = '',
+                reply_error = '',
+                reply_updated_at = ?
+            WHERE id = ?
+            """,
+            (now, note_id),
+        )
+        conn.commit()
+
+    log_activity(
+        "whatsapp_instruction",
+        status="handled",
+        sender=row["sender"] or "",
+        note_id=note_id,
+        detail={"reason": reason[:120]},
+    )
+    return {
+        "ok": True,
+        "reply_status": "handled",
+        "reason": reason,
+    }
 
 
 @app.post(

@@ -50,6 +50,74 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
   bool ocrWorking = false;
   String? ocrStatus;
 
+  IconData _noteTypeIcon(Note value) {
+    return switch (value.messageType) {
+      'image' => Icons.image_outlined,
+      'document' => Icons.insert_drive_file_outlined,
+      'audio' => Icons.audiotrack_outlined,
+      'video' => Icons.videocam_outlined,
+      'contact' => Icons.contact_page_outlined,
+      _ => Icons.notes_outlined,
+    };
+  }
+
+  Future<String?> _materializeCombinedImage(Note value) async {
+    for (final path in value.photoPaths) {
+      final file = File(path);
+      if (await file.exists()) return file.path;
+    }
+    final raw = (value.mediaPath ?? '').trim();
+    if (raw.isEmpty) return null;
+    final local = File(raw);
+    if (await local.exists()) return local.path;
+    if (value.messageType != 'image') return null;
+
+    final bytes = await widget.api.fetchMediaBytes(raw);
+    if (bytes == null || bytes.isEmpty) return null;
+    final docs = await getApplicationDocumentsDirectory();
+    final folder = Directory('${docs.path}/combined_media');
+    if (!await folder.exists()) await folder.create(recursive: true);
+    final safe = KnowledgeStore.noteKey(value)
+        .replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+    var ext = '.jpg';
+    final lower = raw.toLowerCase();
+    if (lower.contains('.png')) ext = '.png';
+    if (lower.contains('.webp')) ext = '.webp';
+    final file = File(
+      '${folder.path}/combined_${safe}_${DateTime.now().microsecondsSinceEpoch}$ext',
+    );
+    await file.writeAsBytes(bytes, flush: true);
+    return file.path;
+  }
+
+  Future<void> createPurchaseDraftFromCombined() async {
+    setState(() => working = true);
+    try {
+      final service = OcrPurchaseService(api: widget.api);
+      final created = await service.createDraftFromCombinedNote(note);
+      draft = created;
+      if (!mounted) return;
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => DraftReviewPage(
+            draft: created,
+            api: widget.api,
+          ),
+        ),
+      );
+      await loadDraft();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('No se pudo crear el borrador: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => working = false);
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -295,6 +363,7 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
                       .map(
                         (other) => CheckboxListTile(
                           value: selected.contains(other.id),
+                          secondary: Icon(_noteTypeIcon(other)),
                           title: Text(other.title),
                           subtitle: Text(
                             other.content.replaceAll('\n', ' '),
@@ -341,10 +410,20 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
               '--- ${n.title} ---\n${n.content.trim().isNotEmpty ? n.content : n.originalText}',
         )
         .join('\n\n');
+    final combinedPhotos = <String>[];
+    for (final source in chosen.where((value) => value.messageType == 'image')) {
+      final path = await _materializeCombinedImage(source);
+      if (path != null && !combinedPhotos.contains(path)) {
+        combinedPhotos.add(path);
+      }
+    }
+
     final merged = await widget.api.createNote(
       title: 'Combinada: ${note.title}',
       content: content,
       category: note.category,
+      mediaPath: combinedPhotos.length == 1 ? combinedPhotos.first : null,
+      photoPaths: combinedPhotos,
     );
 
     final knowledge = KnowledgeStore.instance;
@@ -400,6 +479,7 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
           PopupMenuButton<String>(
             onSelected: (value) {
               if (value == 'combine') combine();
+              if (value == 'purchase_draft') createPurchaseDraftFromCombined();
               if (value == 'open') openOriginal();
             },
             itemBuilder: (_) => [
@@ -407,6 +487,11 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
                 value: 'combine',
                 child: Text('Combinar con otras notas'),
               ),
+              if (note.title.startsWith('Combinada:'))
+                const PopupMenuItem(
+                  value: 'purchase_draft',
+                  child: Text('Crear borrador de compra'),
+                ),
               if (note.mediaPath?.isNotEmpty == true)
                 const PopupMenuItem(
                   value: 'open',

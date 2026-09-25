@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import '../models/purchase_draft.dart';
 import '../services/api_service.dart';
 import '../services/knowledge_store.dart';
+import '../services/ocr_purchase_service.dart';
 import '../services/paqueteria_purchase_sync_service.dart';
+import '../services/photo_storage_service.dart';
 import 'fullscreen_image_viewer.dart';
 
 class DraftReviewPage extends StatefulWidget {
@@ -36,6 +38,8 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
   bool clientsLoading = true;
   bool ambiguityPrompted = false;
   String? clientHint;
+  String selectedOcrPath = '';
+  bool attachmentOcrWorking = false;
 
   @override
   void initState() {
@@ -50,6 +54,7 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
       text: d.total > 0 ? d.total.toStringAsFixed(2) : '',
     );
     items = d.items.map((e) => Map<String, dynamic>.from(e)).toList();
+    selectedOcrPath = d.mediaPath;
     WidgetsBinding.instance.addPostFrameCallback((_) => _loadClients());
   }
 
@@ -268,8 +273,70 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
         description: description.text.trim(),
         total: _money(total.text),
         items: items,
+        mediaPath: selectedOcrPath,
         status: status,
       );
+
+  List<String> get _attachmentPaths {
+    final paths = <String>[];
+    for (final path in widget.draft.attachmentPaths) {
+      if (path.trim().isNotEmpty &&
+          File(path).existsSync() &&
+          !paths.contains(path)) {
+        paths.add(path);
+      }
+    }
+    if (widget.draft.mediaPath.trim().isNotEmpty &&
+        File(widget.draft.mediaPath).existsSync() &&
+        !paths.contains(widget.draft.mediaPath)) {
+      paths.add(widget.draft.mediaPath);
+    }
+    return paths;
+  }
+
+  Future<void> _useAttachmentForOcr(String path) async {
+    if (attachmentOcrWorking) return;
+    setState(() {
+      attachmentOcrWorking = true;
+      selectedOcrPath = path;
+    });
+    try {
+      final result =
+          await OcrPurchaseService(api: widget.api).parseLocalPurchaseImage(path);
+      if (result == null) return;
+      final parsed = result.parsed;
+      setState(() {
+        if (parsed.store.trim().isNotEmpty &&
+            parsed.store != 'Otra tienda') {
+          shop.text = parsed.store;
+        }
+        if (parsed.orderNumber.trim().isNotEmpty) {
+          order.text = parsed.orderNumber;
+        }
+        if (parsed.total > 0) {
+          total.text = parsed.total.toStringAsFixed(2);
+        }
+        if (parsed.items.isNotEmpty) {
+          items = parsed.items
+              .map((item) => Map<String, dynamic>.from(item))
+              .toList();
+          description.text = parsed.items
+              .take(5)
+              .map((item) => (item['name'] ?? '').toString())
+              .where((value) => value.isNotEmpty)
+              .join(', ');
+        }
+      });
+      final updated = _current().copyWith(
+        ocrText: result.text,
+        attachmentPaths: _attachmentPaths,
+      );
+      await store.saveDraft(updated);
+      await store.syncOcrKeyEntities(updated);
+    } finally {
+      if (mounted) setState(() => attachmentOcrWorking = false);
+    }
+  }
 
   Future<void> _saveOnly() async {
     final draft = _current();
@@ -363,7 +430,9 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
 
     setState(() => saving = true);
     try {
-      final draft = _current(status: 'confirmed');
+      final draft = _current(status: 'confirmed').copyWith(
+        attachmentPaths: _attachmentPaths,
+      );
 
       Future<void> learn(
         String field,
@@ -401,6 +470,16 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
       await store.saveDraft(draft);
       await store.syncOcrKeyEntities(draft);
 
+      await PhotoStorageService.instance.finalizePurchasePhotos(
+        draft.attachmentPaths.isNotEmpty
+            ? draft.attachmentPaths
+            : (draft.mediaPath.isEmpty ? const <String>[] : <String>[draft.mediaPath]),
+        customerName:
+            draft.customerName.trim().isEmpty ? 'Cliente' : draft.customerName,
+        orderNumber: draft.orderNumber,
+        draftId: draft.id,
+      );
+
       final sync = PaqueteriaPurchaseSyncService(widget.api);
       await sync.enqueue(
         externalId: 'whatsbot-draft-${draft.id}',
@@ -408,8 +487,11 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
         customerPhone: draft.customerPhone,
         title: draft.store,
         description: draft.description,
-        photoPaths:
-            draft.mediaPath.isEmpty ? const [] : <String>[draft.mediaPath],
+        photoPaths: draft.attachmentPaths.isNotEmpty
+            ? draft.attachmentPaths
+            : (draft.mediaPath.isEmpty
+                ? const <String>[]
+                : <String>[draft.mediaPath]),
         store: draft.store,
         total: draft.total,
         orderNumber: draft.orderNumber,
@@ -461,6 +543,7 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
   @override
   Widget build(BuildContext context) {
     final d = widget.draft;
+    final attachments = _attachmentPaths;
     final confidence = (d.confidence * 100).round();
     return Scaffold(
       appBar: AppBar(title: const Text('Borrador para Paquetería')),
@@ -477,57 +560,111 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
                 ),
               ),
             ),
-            if (d.mediaPath.isNotEmpty && File(d.mediaPath).existsSync()) ...[
+            if (attachments.isNotEmpty) ...[
               const SizedBox(height: 10),
-              Semantics(
-                button: true,
-                label: 'Abrir foto del OCR a pantalla completa',
-                child: InkWell(
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      attachments.length == 1
+                          ? 'Foto adjunta'
+                          : 'Fotos adjuntas (${attachments.length})',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ),
+                  if (attachmentOcrWorking)
+                    const SizedBox.square(
+                      dimension: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              if (attachments.length == 1)
+                InkWell(
                   borderRadius: BorderRadius.circular(14),
-                  onTap: () => _openOcrImage(d.mediaPath),
-                  child: Stack(
-                    alignment: Alignment.bottomCenter,
-                    children: [
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(14),
-                        child: SizedBox(
-                          width: double.infinity,
-                          height: 240,
-                          child: Image.file(
-                            File(d.mediaPath),
-                            fit: BoxFit.contain,
+                  onTap: () => _openOcrImage(attachments.first),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(14),
+                    child: SizedBox(
+                      width: double.infinity,
+                      height: 240,
+                      child: Image.file(
+                        File(attachments.first),
+                        fit: BoxFit.contain,
+                      ),
+                    ),
+                  ),
+                )
+              else
+                SizedBox(
+                  height: 230,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: attachments.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 10),
+                    itemBuilder: (context, index) {
+                      final path = attachments[index];
+                      final selected = selectedOcrPath == path;
+                      return SizedBox(
+                        width: 180,
+                        child: Card(
+                          clipBehavior: Clip.antiAlias,
+                          child: Column(
+                            children: [
+                              Expanded(
+                                child: InkWell(
+                                  onTap: () => _openOcrImage(path),
+                                  child: Stack(
+                                    fit: StackFit.expand,
+                                    children: [
+                                      Image.file(
+                                        File(path),
+                                        fit: BoxFit.contain,
+                                      ),
+                                      if (selected)
+                                        const Align(
+                                          alignment: Alignment.topRight,
+                                          child: Padding(
+                                            padding: EdgeInsets.all(8),
+                                            child: Icon(
+                                              Icons.check_circle,
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              SizedBox(
+                                width: double.infinity,
+                                child: TextButton.icon(
+                                  onPressed: attachmentOcrWorking
+                                      ? null
+                                      : () => _useAttachmentForOcr(path),
+                                  icon: const Icon(
+                                    Icons.document_scanner_outlined,
+                                  ),
+                                  label: Text(
+                                    selected
+                                        ? 'OCR seleccionado'
+                                        : 'Usar para OCR',
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ),
-                      Container(
-                        margin: const EdgeInsets.only(bottom: 10),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 7,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withValues(alpha: 0.68),
-                          borderRadius: BorderRadius.circular(18),
-                        ),
-                        child: const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.zoom_in_outlined,
-                              color: Colors.white,
-                              size: 18,
-                            ),
-                            SizedBox(width: 6),
-                            Text(
-                              'Toca para ampliar',
-                              style: TextStyle(color: Colors.white),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
+                      );
+                    },
                   ),
                 ),
+              const SizedBox(height: 6),
+              Text(
+                attachments.length == 1
+                    ? 'Toca la imagen para verla en grande.'
+                    : 'Toca una imagen para verla en grande o usa “Usar para OCR” para analizar esa foto.',
+                style: Theme.of(context).textTheme.bodySmall,
               ),
             ],
             const SizedBox(height: 14),

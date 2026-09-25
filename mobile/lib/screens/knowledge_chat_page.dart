@@ -11,6 +11,7 @@ import '../services/api_service.dart';
 import '../services/embedding_service.dart';
 import '../services/knowledge_chat_store.dart';
 import '../services/knowledge_store.dart';
+import '../services/ocr_purchase_service.dart';
 import 'knowledge_chat_widgets.dart';
 
 class KnowledgeChatPage extends StatefulWidget {
@@ -544,6 +545,32 @@ class _KnowledgeChatPageState extends State<KnowledgeChatPage> {
                     .toList());
       }
 
+      String? localActionAnswer;
+      final wantsPurchaseDraft = RegExp(
+        r'\b(?:crea|crear|haz|hacer|prepara|preparar|genera|generar)\b.*\b(?:borrador|compra|pedido)\b|\bborrador\s+de\s+compra\b',
+        caseSensitive: false,
+      ).hasMatch(question);
+      if (wantsPurchaseDraft && useNotes && selected.isNotEmpty) {
+        Note? target;
+        for (final candidate in selected) {
+          if (candidate.title.startsWith('Combinada:')) {
+            target = candidate;
+            break;
+          }
+        }
+        final targetNote = target ?? selected.first;
+        try {
+          final draft = await OcrPurchaseService(api: widget.api)
+              .createDraftFromCombinedNote(targetNote);
+          localActionAnswer =
+              'Borrador de compra creado con los datos de “${targetNote.title}”. '
+              'Tiene ${draft.attachmentPaths.length} imagen(es) adjunta(s) para revisar.';
+        } catch (_) {
+          localActionAnswer =
+              'Encontré la nota, pero no pude crear el borrador de compra.';
+        }
+      }
+
       final excerptLimit = responseMode == 'fast'
           ? 450
           : responseMode == 'deep'
@@ -589,16 +616,17 @@ class _KnowledgeChatPageState extends State<KnowledgeChatPage> {
         'PREGUNTA:\n$question',
       ];
 
-      final answer = await widget.ai.ask(
-        system: system,
-        prompt: promptParts.join('\n\n'),
-        maxTokens: responseMode == 'fast'
-            ? 650
-            : responseMode == 'deep'
-                ? 1900
-                : 1200,
-        temperature: responseMode == 'deep' ? 0.15 : 0.2,
-      );
+      final answer = localActionAnswer ??
+          await widget.ai.ask(
+            system: system,
+            prompt: promptParts.join('\n\n'),
+            maxTokens: responseMode == 'fast'
+                ? 650
+                : responseMode == 'deep'
+                    ? 1900
+                    : 1200,
+            temperature: responseMode == 'deep' ? 0.15 : 0.2,
+          );
 
       if (!mounted ||
           token != _turnToken ||

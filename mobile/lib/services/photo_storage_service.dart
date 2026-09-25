@@ -149,6 +149,60 @@ class PhotoStorageService {
     return null;
   }
 
+  String _safeStem(String value) {
+    final cleaned = value
+        .replaceAll(RegExp(r'[\\/:*?"<>|]'), '_')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    return cleaned.isEmpty ? 'Cliente' : cleaned;
+  }
+
+  Future<List<PhotoSaveResult>> finalizePurchasePhotos(
+    Iterable<String> paths, {
+    required String customerName,
+    String orderNumber = '',
+    String draftId = '',
+  }) async {
+    final unique = <String>[];
+    for (final raw in paths) {
+      final path = raw.trim();
+      if (path.isEmpty || unique.contains(path)) continue;
+      final file = File(path);
+      if (await file.exists()) unique.add(path);
+    }
+    if (unique.isEmpty) return const <PhotoSaveResult>[];
+
+    final customer = _safeStem(customerName);
+    final order = _safeStem(orderNumber);
+    final draftSuffix = _safeStem(draftId)
+        .replaceAll('draft_', '')
+        .take(30);
+    final qualifier = orderNumber.trim().isNotEmpty
+        ? order
+        : draftSuffix.isNotEmpty
+            ? draftSuffix
+            : DateTime.now().millisecondsSinceEpoch.toString();
+
+    final saved = <PhotoSaveResult>[];
+    for (var i = 0; i < unique.length; i++) {
+      final path = unique[i];
+      final file = File(path);
+      final bytes = await file.readAsBytes();
+      final ext = _extension(path);
+      final suffix = unique.length == 1 ? '' : '_${i + 1}';
+      final name = '${customer}_${qualifier}$suffix$ext';
+      final result = await saveBytes(
+        bytes,
+        kind: PhotoFolderKind.purchases,
+        fileName: name,
+        mimeType: _mimeForExtension(ext),
+        overwrite: true,
+      );
+      if (result != null) saved.add(result);
+    }
+    return saved;
+  }
+
   Future<PhotoSaveResult?> saveLocalFile(
     String path, {
     required PhotoFolderKind kind,

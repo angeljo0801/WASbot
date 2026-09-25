@@ -18,6 +18,7 @@ class PurchaseDraft {
   final double confidence;
   final List<String> warnings;
   final String mediaPath;
+  final List<String> attachmentPaths;
   final String status;
   final String draftType;
   final String remittanceSource;
@@ -43,6 +44,7 @@ class PurchaseDraft {
     required this.confidence,
     required this.warnings,
     required this.mediaPath,
+    this.attachmentPaths = const <String>[],
     required this.status,
     this.draftType = 'purchase',
     this.remittanceSource = '',
@@ -69,6 +71,7 @@ class PurchaseDraft {
     double? confidence,
     List<String>? warnings,
     String? mediaPath,
+    List<String>? attachmentPaths,
     String? status,
     String? draftType,
     String? remittanceSource,
@@ -92,6 +95,7 @@ class PurchaseDraft {
         confidence: confidence ?? this.confidence,
         warnings: warnings ?? this.warnings,
         mediaPath: mediaPath ?? this.mediaPath,
+        attachmentPaths: attachmentPaths ?? this.attachmentPaths,
         status: status ?? this.status,
         draftType: draftType ?? this.draftType,
         remittanceSource: remittanceSource ?? this.remittanceSource,
@@ -118,6 +122,7 @@ class PurchaseDraft {
         'confidence': confidence,
         'warnings': warnings,
         'media_path': mediaPath,
+        'attachment_paths': attachmentPaths,
         'status': status,
         'draft_type': draftType,
         'remittance_source': remittanceSource,
@@ -149,6 +154,10 @@ class PurchaseDraft {
             .map((e) => e.toString())
             .toList(),
         mediaPath: (json['media_path'] ?? '').toString(),
+        attachmentPaths: ((json['attachment_paths'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .where((e) => e.isNotEmpty)
+            .toList(),
         status: (json['status'] ?? 'pending').toString(),
         draftType: (json['draft_type'] ?? 'purchase').toString(),
         remittanceSource: (json['remittance_source'] ?? '').toString(),
