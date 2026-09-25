@@ -257,7 +257,7 @@ class OcrPurchaseService {
       lines.add('Nombre: ${draft.customerName.trim()}');
     }
     if (draft.total > 0) {
-      lines.add('Monto: \${draft.total.toStringAsFixed(2)}');
+      lines.add('Monto: \$${draft.total.toStringAsFixed(2)}');
     }
     if (draft.remittanceDate.trim().isNotEmpty) {
       lines.add('Fecha: ${draft.remittanceDate.trim()}');
@@ -268,7 +268,7 @@ class OcrPurchaseService {
   String _remittanceTitle(PurchaseDraft draft) {
     final parts = <String>['Remesa', draft.remittanceSource];
     if (draft.total > 0) {
-      parts.add('\${draft.total.toStringAsFixed(2)}');
+      parts.add('\$${draft.total.toStringAsFixed(2)}');
     }
     return parts.where((e) => e.trim().isNotEmpty).join(' · ');
   }
