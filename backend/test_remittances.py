@@ -132,6 +132,31 @@ paypal_duplicate = remittances.ingest_paypal_email(
     'paypal-test-1',
 )
 assert paypal_duplicate is not None and paypal_duplicate['duplicate'] is True
+ocr_zelle = remittances.upsert_ocr_remittance(
+    note_id=0,
+    source='Zelle',
+    name='',
+    amount=55.00,
+    date_text='09/24/2026',
+    ocr_text='Your payment is sent\nAmount $55.00\nDate Sep 24, 2026',
+)
+assert ocr_zelle['source'] == 'zelle'
+assert ocr_zelle['name'] == ''
+assert ocr_zelle['amount'] == 55.0
+assert ocr_zelle['date'] == '09/24/2026'
+
+ocr_paypal = remittances.upsert_ocr_remittance(
+    note_id=0,
+    source='PayPal',
+    name='Alexandre Adam-tremblay',
+    amount=158.99,
+    date_text='09/23/2026',
+    ocr_text='Alexandre Adam-tremblay sent you $158.99 USD',
+)
+assert ocr_paypal['source'] == 'paypal'
+assert ocr_paypal['name'] == 'Alexandre Adam-tremblay'
+assert ocr_paypal['amount'] == 158.99
+assert ocr_paypal['date'] == '09/23/2026'
 agents = remittances.set_agents(['+1 (772) 555-0123'])
 assert agents == ['+17725550123']
 code, day = remittances.ensure_daily_code()
