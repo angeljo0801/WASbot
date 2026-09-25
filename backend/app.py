@@ -604,6 +604,7 @@ def approve_contacts_for_paqueteria(
 ) -> int:
     now = utc_now()
     saved = 0
+    identities: list[tuple[str, str, str]] = []
     with closing(db()) as conn:
         for i, contact in enumerate(contacts):
             name = str(contact.get("name", "")).strip() or "Cliente WhatsApp"
@@ -624,12 +625,36 @@ def approve_contacts_for_paqueteria(
                 """,
                 (external_id, name, phone, now, now),
             )
+            identities.append((external_id, name, phone))
             saved += 1
         conn.execute(
             "DELETE FROM pending_contact_requests WHERE sender = ?",
             (normalize_phone(sender),),
         )
         conn.commit()
+
+    for external_id, name, phone in identities:
+        remember_client_alias(
+            external_id,
+            name,
+            "name",
+            name,
+            source="whatsapp_contact",
+        )
+        if phone:
+            remember_client_alias(
+                external_id,
+                name,
+                "phone",
+                phone,
+                source="whatsapp_contact",
+            )
+    if saved:
+        log_activity(
+            "client_identity",
+            sender=sender,
+            detail={"contacts_saved": saved},
+        )
     return saved
 
 
