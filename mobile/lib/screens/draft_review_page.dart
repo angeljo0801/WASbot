@@ -271,7 +271,9 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
       );
 
   Future<void> _saveOnly() async {
-    await store.saveDraft(_current());
+    final draft = _current();
+    await store.saveDraft(draft);
+    await store.syncOcrKeyEntities(draft);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Borrador actualizado.')),
@@ -362,18 +364,7 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
     try {
       final draft = _current(status: 'confirmed');
       await store.saveDraft(draft);
-
-      if (draft.customerName.isNotEmpty) {
-        final entity = await store.upsertEntity(
-          draft.customerName,
-          type: 'cliente',
-        );
-        await store.linkEntity(
-          entity.id,
-          draft.noteKey,
-          relation: 'cliente',
-        );
-      }
+      await store.syncOcrKeyEntities(draft);
 
       final sync = PaqueteriaPurchaseSyncService(widget.api);
       await sync.enqueue(
@@ -414,7 +405,9 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
   }
 
   Future<void> _discard() async {
-    await store.saveDraft(_current(status: 'discarded'));
+    final draft = _current(status: 'discarded');
+    await store.saveDraft(draft);
+    await store.clearOcrEntityLinks(draft.noteKey);
     if (mounted) Navigator.pop(context, true);
   }
 
