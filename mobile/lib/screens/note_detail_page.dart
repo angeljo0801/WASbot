@@ -114,9 +114,14 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
       }
       setState(() {
         draft = result.draft;
-        ocrStatus = result.ocrText.trim().isEmpty
-            ? 'OCR completado, pero no se detectó texto suficiente.'
-            : 'OCR listo · borrador preparado para revisar.';
+        if (result.ocrText.trim().isEmpty) {
+          ocrStatus = 'OCR completado, pero no se detectó texto suficiente.';
+        } else if (result.draft.draftType == 'remittance') {
+          ocrStatus =
+              'Remesa ${result.draft.remittanceSource} detectada · revisa el borrador.';
+        } else {
+          ocrStatus = 'Compra detectada · borrador preparado para revisar.';
+        }
       });
     } catch (e) {
       if (mounted) {
