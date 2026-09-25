@@ -696,7 +696,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                     ),
                     const SizedBox(height: 8),
                     const Text(
-                      'WhatsBot registra las remesas recibidas por SMS de Bank of America con nombre, monto y fecha. Los agentes de esta sección solo pueden consultar Remesas.',
+                      'WhatsBot registra las remesas recibidas por SMS de Bank of America y pagos de PayPal detectados en Gmail, guardando nombre, monto y fecha. Los agentes de esta sección solo pueden consultar Remesas.',
                     ),
                     const SizedBox(height: 16),
                     Card(
