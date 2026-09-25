@@ -41,7 +41,6 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
     'Documentos',
     'Recordatorios',
     'Fotos',
-    'Remesas',
   ];
 
   late Note note;
