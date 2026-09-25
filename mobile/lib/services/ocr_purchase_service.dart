@@ -445,8 +445,9 @@ class OcrPurchaseService {
           discount: imageParsed.discount > 0
               ? imageParsed.discount
               : parsed.discount,
-          expectedItemCount:
-              imageParsed.expectedItemCount ?? parsed.expectedItemCount,
+          expectedItemCount: imageParsed.expectedItemCount > 0
+              ? imageParsed.expectedItemCount
+              : parsed.expectedItemCount,
           items: imageParsed.items.isNotEmpty ? imageParsed.items : parsed.items,
           warnings: <String>[...parsed.warnings, ...imageParsed.warnings],
           confidence: imageParsed.confidence > parsed.confidence
@@ -459,6 +460,14 @@ class OcrPurchaseService {
     }
 
     final customer = await _resolveCustomerFromOcr(note.content);
+    String instructedCustomer = '';
+    for (final line in note.content.split(RegExp(r'[\r\n]+'))) {
+      final correction = OcrNaturalCorrectionParser.parse(line);
+      if (correction?.field == OcrCorrectionField.customerName &&
+          correction!.value.trim().isNotEmpty) {
+        instructedCustomer = correction.value.trim();
+      }
+    }
     final now = DateTime.now();
     final draft = PurchaseDraft(
       id: 'draft_combined_' +
@@ -467,7 +476,9 @@ class OcrPurchaseService {
       noteKey: KnowledgeStore.noteKey(note),
       customerName: note.customerName.trim().isNotEmpty
           ? note.customerName
-          : (customer['name'] ?? ''),
+          : instructedCustomer.isNotEmpty
+              ? instructedCustomer
+              : (customer['name'] ?? ''),
       customerPhone: note.customerPhone.trim().isNotEmpty
           ? note.customerPhone
           : (customer['phone'] ?? ''),
