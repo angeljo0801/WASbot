@@ -173,15 +173,6 @@ class PhotoStorageService {
     if (unique.isEmpty) return const <PhotoSaveResult>[];
 
     final customer = _safeStem(customerName);
-    final order = _safeStem(orderNumber);
-    final draftSuffix = _safeStem(draftId)
-        .replaceAll('draft_', '')
-        .take(30);
-    final qualifier = orderNumber.trim().isNotEmpty
-        ? order
-        : draftSuffix.isNotEmpty
-            ? draftSuffix
-            : DateTime.now().millisecondsSinceEpoch.toString();
 
     final saved = <PhotoSaveResult>[];
     for (var i = 0; i < unique.length; i++) {
@@ -190,13 +181,13 @@ class PhotoStorageService {
       final bytes = await file.readAsBytes();
       final ext = _extension(path);
       final suffix = unique.length == 1 ? '' : '_${i + 1}';
-      final name = '${customer}_${qualifier}$suffix$ext';
+      final name = '$customer$suffix$ext';
       final result = await saveBytes(
         bytes,
         kind: PhotoFolderKind.purchases,
         fileName: name,
         mimeType: _mimeForExtension(ext),
-        overwrite: true,
+        overwrite: false,
       );
       if (result != null) saved.add(result);
     }
