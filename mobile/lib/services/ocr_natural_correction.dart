@@ -25,6 +25,21 @@ class OcrNaturalCorrection {
 
   bool get targetsRemittances => targetType == 'remittance';
   bool get targetsPurchases => targetType == 'purchase';
+
+  factory OcrNaturalCorrection.fromJson(Map<String, dynamic> json) {
+    final rawField = (json['field'] ?? '').toString();
+    final field = OcrCorrectionField.values.firstWhere(
+      (value) => value.name == rawField,
+      orElse: () => OcrCorrectionField.customerName,
+    );
+    return OcrNaturalCorrection(
+      field: field,
+      value: (json['value'] ?? '').toString().trim(),
+      batch: json['batch'] == true,
+      count: (json['count'] as num?)?.toInt(),
+      targetType: (json['target_type'] ?? 'purchase').toString(),
+    );
+  }
 }
 
 class OcrNaturalCorrectionParser {
