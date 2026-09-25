@@ -902,6 +902,27 @@ class ApiService {
       return false;
     }
   }
+  Future<bool> markWhatsappHandled({
+    required int noteId,
+    String reason = 'handled',
+  }) async {
+    if (noteId <= 0) return false;
+    final url = await baseUrl;
+    if (url.isEmpty) return false;
+    try {
+      final r = await http
+          .post(
+            Uri.parse('$url/api/whatsapp/replies/$noteId/handled'),
+            headers: await _headers(),
+            body: jsonEncode({'reason': reason}),
+          )
+          .timeout(const Duration(seconds: 15));
+      return r.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
 
   Future<Map<String, dynamic>?> comboStatus() async {
     final url = await baseUrl;
