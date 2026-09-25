@@ -1108,7 +1108,13 @@ class OcrPurchaseService {
   ) async {
     final correction = OcrNaturalCorrectionParser.parse(message);
     if (correction == null) return null;
+    return applyCorrection(correction, messageNote);
+  }
 
+  Future<OcrCorrectionApplyResult> applyCorrection(
+    OcrNaturalCorrection correction,
+    Note messageNote,
+  ) async {
     final prefs = await SharedPreferences.getInstance();
     final resultKey = _correctionResultKey(messageNote);
     final cached = prefs.getString(resultKey);
