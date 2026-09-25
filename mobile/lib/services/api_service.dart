@@ -127,7 +127,7 @@ class ApiService {
           'sms_id': smsId,
         }),
       ).timeout(const Duration(seconds: 12));
-      return r.statusCode == 200 || r.statusCode == 201 || r.statusCode == 422;
+      return r.statusCode == 200 || r.statusCode == 201;
     } catch (_) {
       return false;
     }
