@@ -350,7 +350,17 @@ class PhotoStorageService {
         : note.id.toString();
     final key = '$_archivePrefix${kind.wireValue}_$identity';
     final archived = prefs.getString(key) ?? '';
-    if (archived.startsWith('${selected.uri}|')) return false;
+    if (archived.startsWith('${selected.uri}|')) {
+      final mappedPath = (localPath ?? '').trim().isNotEmpty
+          ? localPath!.trim()
+          : (note.mediaPath ?? '').trim();
+      final parts = archived.split('|');
+      final archivedUri = parts.length > 1 ? parts.sublist(1).join('|') : '';
+      if (mappedPath.isNotEmpty && archivedUri.isNotEmpty) {
+        await _rememberExternalUri(kind, mappedPath, archivedUri);
+      }
+      return false;
+    }
 
     final bytes = await _bytesForNote(note, api, localPath: localPath);
     if (bytes == null || bytes.isEmpty) return false;
