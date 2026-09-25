@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -66,6 +67,49 @@ class PhotoStorageService {
       MethodChannel('com.whatsbot.whatsbot/photo_storage');
 
   static const String _archivePrefix = 'photo_storage_archived_note_';
+  static const String _pathMapPrefix = 'photo_storage_path_map_';
+
+  String _pathMapKey(PhotoFolderKind kind) =>
+      '$_pathMapPrefix${kind.wireValue}';
+
+  Future<Map<String, String>> _pathMap(PhotoFolderKind kind) async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_pathMapKey(kind));
+    if (raw == null || raw.trim().isEmpty) return <String, String>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return <String, String>{};
+      return decoded.map(
+        (key, value) => MapEntry(key.toString(), value.toString()),
+      );
+    } catch (_) {
+      return <String, String>{};
+    }
+  }
+
+  Future<void> _rememberExternalUri(
+    PhotoFolderKind kind,
+    String localPath,
+    String uri,
+  ) async {
+    final path = localPath.trim();
+    final value = uri.trim();
+    if (path.isEmpty || value.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    final map = await _pathMap(kind);
+    map[path] = value;
+    await prefs.setString(_pathMapKey(kind), jsonEncode(map));
+  }
+
+  Future<String?> _externalUriForPath(
+    PhotoFolderKind kind,
+    String localPath,
+  ) async {
+    final map = await _pathMap(kind);
+    final uri = map[localPath.trim()]?.trim() ?? '';
+    return uri.isEmpty ? null : uri;
+  }
+
 
   Future<PhotoFolderInfo?> selectedFolder(PhotoFolderKind kind) async {
     try {
@@ -157,6 +201,25 @@ class PhotoStorageService {
     return cleaned.isEmpty ? 'Cliente' : cleaned;
   }
 
+  Future<PhotoSaveResult?> _renameExistingPhoto(
+    String uri, {
+    required PhotoFolderKind kind,
+    required String fileName,
+  }) async {
+    try {
+      final raw = await _channel.invokeMethod<dynamic>(
+        'renameImage',
+        <String, dynamic>{
+          'kind': kind.wireValue,
+          'uri': uri,
+          'fileName': fileName,
+        },
+      );
+      if (raw is Map) return PhotoSaveResult.fromMap(raw);
+    } catch (_) {}
+    return null;
+  }
+
   Future<List<PhotoSaveResult>> finalizePurchasePhotos(
     Iterable<String> paths, {
     required String customerName,
@@ -173,25 +236,35 @@ class PhotoStorageService {
     if (unique.isEmpty) return const <PhotoSaveResult>[];
 
     final customer = _safeStem(customerName);
+    final renamed = <PhotoSaveResult>[];
 
-    final saved = <PhotoSaveResult>[];
     for (var i = 0; i < unique.length; i++) {
       final path = unique[i];
-      final file = File(path);
-      final bytes = await file.readAsBytes();
+      final existingUri = await _externalUriForPath(
+        PhotoFolderKind.purchases,
+        path,
+      );
+      if (existingUri == null) {
+        continue;
+      }
+
       final ext = _extension(path);
       final suffix = unique.length == 1 ? '' : '_${i + 1}';
-      final name = '$customer$suffix$ext';
-      final result = await saveBytes(
-        bytes,
+      final desiredName = '$customer$suffix$ext';
+      final result = await _renameExistingPhoto(
+        existingUri,
         kind: PhotoFolderKind.purchases,
-        fileName: name,
-        mimeType: _mimeForExtension(ext),
-        overwrite: false,
+        fileName: desiredName,
       );
-      if (result != null) saved.add(result);
+      if (result == null) continue;
+      await _rememberExternalUri(
+        PhotoFolderKind.purchases,
+        path,
+        result.uri,
+      );
+      renamed.add(result);
     }
-    return saved;
+    return renamed;
   }
 
   Future<PhotoSaveResult?> saveLocalFile(
@@ -210,13 +283,17 @@ class PhotoStorageService {
     final name = original.isEmpty
         ? '${prefix}_${DateTime.now().microsecondsSinceEpoch}$ext'
         : original;
-    return saveBytes(
+    final saved = await saveBytes(
       bytes,
       kind: kind,
       fileName: name,
       mimeType: _mimeForExtension(ext),
       overwrite: overwrite,
     );
+    if (saved != null) {
+      await _rememberExternalUri(kind, path, saved.uri);
+    }
+    return saved;
   }
 
   Future<Uint8List?> _bytesForNote(
@@ -292,6 +369,12 @@ class PhotoStorageService {
     );
     if (saved == null || saved.uri.isEmpty) return false;
 
+    final mappedPath = (localPath ?? '').trim().isNotEmpty
+        ? localPath!.trim()
+        : (note.mediaPath ?? '').trim();
+    if (mappedPath.isNotEmpty) {
+      await _rememberExternalUri(kind, mappedPath, saved.uri);
+    }
     await prefs.setString(key, '${selected.uri}|${saved.uri}');
     return true;
   }
