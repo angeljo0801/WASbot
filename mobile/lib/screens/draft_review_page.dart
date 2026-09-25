@@ -364,6 +364,40 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
     setState(() => saving = true);
     try {
       final draft = _current(status: 'confirmed');
+
+      Future<void> learn(
+        String field,
+        String original,
+        String corrected,
+      ) async {
+        if (original.trim().isEmpty ||
+            corrected.trim().isEmpty ||
+            original.trim() == corrected.trim()) {
+          return;
+        }
+        await widget.api.recordOcrCorrection(
+          source: widget.draft.store,
+          field: field,
+          original: original,
+          corrected: corrected,
+        );
+      }
+
+      await learn(
+        'total',
+        widget.draft.total > 0 ? widget.draft.total.toStringAsFixed(2) : '',
+        draft.total > 0 ? draft.total.toStringAsFixed(2) : '',
+      );
+      await learn(
+        'customer_name',
+        widget.draft.customerName,
+        draft.customerName,
+      );
+      await learn(
+        'order_number',
+        widget.draft.orderNumber,
+        draft.orderNumber,
+      );
       await store.saveDraft(draft);
       await store.syncOcrKeyEntities(draft);
 
