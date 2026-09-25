@@ -18,6 +18,10 @@ class MainActivity : FlutterActivity() {
             this,
             flutterEngine.dartExecutor.binaryMessenger
         )
+        WhatsBotPayPalEmailBridge.register(
+            this,
+            flutterEngine.dartExecutor.binaryMessenger
+        )
     }
 
     override fun onRequestPermissionsResult(
