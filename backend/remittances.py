@@ -287,13 +287,20 @@ def ingest_bofa_sms(text: str, received_at: str, sms_id: str = "") -> dict[str, 
 def _parse_agent_query(text: str) -> tuple[str, int] | None:
     raw = " ".join((text or "").split())
     amount_match = re.search(
-        r"(?:USD\s*)?\$\s*([\d,]+(?:\.\d{1,2})?)|(?:USD\s+)([\d,]+(?:\.\d{1,2})?)",
+        r"(?:USD\s*)?\$\s*([\d,]+(?:\.\d{1,2})?)"
+        r"|(?:USD\s+)([\d,]+(?:\.\d{1,2})?)"
+        r"|(?:\b(?:por|monto)?\s*)([\d,]+(?:\.\d{1,2})?)\s*(?:dólares|dolares)?\s*$",
         raw,
         flags=re.IGNORECASE,
     )
     if amount_match is None:
         return None
-    amount_raw = amount_match.group(1) or amount_match.group(2) or ""
+    amount_raw = (
+        amount_match.group(1)
+        or amount_match.group(2)
+        or amount_match.group(3)
+        or ""
+    )
     try:
         cents = int((Decimal(amount_raw.replace(",", "")) * 100).quantize(Decimal("1")))
     except InvalidOperation:
@@ -373,4 +380,4 @@ def handle_agent_message(sender: str, body: str) -> str:
     if match is None:
         return "No encontré una remesa que coincida con esos datos."
     amount_text = "$" + f"{match['amount_cents'] / 100:.2f}"
-    return f"Sí, llegó la remesa de {match['name']} por {amount_text}."
+    return f"Sí, esa remesa llegó por {amount_text}."
