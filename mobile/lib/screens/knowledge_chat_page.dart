@@ -550,7 +550,7 @@ class _KnowledgeChatPageState extends State<KnowledgeChatPage> {
         r'\b(?:crea|crear|haz|hacer|prepara|preparar|genera|generar)\b.*\b(?:borrador|compra|pedido)\b|\bborrador\s+de\s+compra\b',
         caseSensitive: false,
       ).hasMatch(question);
-      if (wantsPurchaseDraft && useNotes && selected.isNotEmpty) {
+      if (wantsPurchaseDraft && useNotes) {
         Note? target;
         for (final candidate in selected) {
           if (candidate.title.startsWith('Combinada:')) {
@@ -558,16 +558,32 @@ class _KnowledgeChatPageState extends State<KnowledgeChatPage> {
             break;
           }
         }
-        final targetNote = target ?? selected.first;
-        try {
-          final draft = await OcrPurchaseService(api: widget.api)
-              .createDraftFromCombinedNote(targetNote);
+        if (target == null) {
+          final combined = notes
+              .where((candidate) => candidate.title.startsWith('Combinada:'))
+              .toList()
+            ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+          if (combined.isNotEmpty) target = combined.first;
+        }
+        if (target == null && selected.isNotEmpty) {
+          target = selected.first;
+        }
+
+        if (target != null) {
+          final targetNote = target;
+          try {
+            final draft = await OcrPurchaseService(api: widget.api)
+                .createDraftFromCombinedNote(targetNote);
+            localActionAnswer =
+                'Borrador de compra creado con los datos de “${targetNote.title}”. '
+                'Tiene ${draft.attachmentPaths.length} imagen(es) adjunta(s) para revisar.';
+          } catch (_) {
+            localActionAnswer =
+                'Encontré la nota, pero no pude crear el borrador de compra.';
+          }
+        } else {
           localActionAnswer =
-              'Borrador de compra creado con los datos de “${targetNote.title}”. '
-              'Tiene ${draft.attachmentPaths.length} imagen(es) adjunta(s) para revisar.';
-        } catch (_) {
-          localActionAnswer =
-              'Encontré la nota, pero no pude crear el borrador de compra.';
+              'No encontré una nota combinada o una nota reciente con datos para crear el borrador.';
         }
       }
 
