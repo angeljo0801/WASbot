@@ -41,6 +41,13 @@ object WhatsBotPhotoStorageBridge {
                             writeImage(kind, fileName, mimeType, bytes, overwrite)
                         )
                     }
+                    "renameImage" -> {
+                        val uri = call.argument<String>("uri")
+                            ?: throw IllegalArgumentException("Falta la imagen que se va a renombrar.")
+                        val fileName = call.argument<String>("fileName")
+                            ?: throw IllegalArgumentException("Falta el nuevo nombre.")
+                        result.success(renameImage(kind, uri, fileName))
+                    }
                     else -> result.notImplemented()
                 }
             } catch (e: Exception) {
@@ -225,6 +232,101 @@ object WhatsBotPhotoStorageBridge {
                     ?: "Carpeta seleccionada"
             )
         )
+    }
+
+    private fun renameImage(
+        kind: String,
+        rawUri: String,
+        requestedName: String
+    ): Map<String, Any?> {
+        val folderRaw = prefs().getString(uriKey(kind), "") ?: ""
+        if (folderRaw.isBlank()) {
+            throw IllegalStateException("No hay una carpeta configurada.")
+        }
+
+        val documentUri = Uri.parse(rawUri)
+        val treeUri = Uri.parse(folderRaw)
+        val currentName = queryName(documentUri) ?: ""
+        val safeRequested = sanitizeName(requestedName)
+        val finalName = uniqueNameExcluding(treeUri, safeRequested, documentUri)
+
+        if (currentName == finalName) {
+            return mapOf(
+                "kind" to kind,
+                "uri" to documentUri.toString(),
+                "name" to currentName,
+                "folder" to (
+                    prefs().getString(labelKey(kind), "")?.takeIf { it.isNotBlank() }
+                        ?: "Carpeta seleccionada"
+                )
+            )
+        }
+
+        val renamed = DocumentsContract.renameDocument(
+            activity!!.contentResolver,
+            documentUri,
+            finalName
+        ) ?: throw IllegalStateException("No se pudo cambiar el nombre de la imagen.")
+
+        return mapOf(
+            "kind" to kind,
+            "uri" to renamed.toString(),
+            "name" to (queryName(renamed) ?: finalName),
+            "folder" to (
+                prefs().getString(labelKey(kind), "")?.takeIf { it.isNotBlank() }
+                    ?: "Carpeta seleccionada"
+            )
+        )
+    }
+
+    private fun uniqueNameExcluding(
+        treeUri: Uri,
+        original: String,
+        excludedUri: Uri
+    ): String {
+        if (!nameExistsOtherThan(treeUri, original, excludedUri)) return original
+        val dot = original.lastIndexOf('.')
+        val stem = if (dot > 0) original.substring(0, dot) else original
+        val ext = if (dot > 0) original.substring(dot) else ""
+        var index = 2
+        while (true) {
+            val candidate = stem + "_" + index + ext
+            if (!nameExistsOtherThan(treeUri, candidate, excludedUri)) return candidate
+            index++
+        }
+    }
+
+    private fun nameExistsOtherThan(
+        treeUri: Uri,
+        fileName: String,
+        excludedUri: Uri
+    ): Boolean {
+        val resolver = activity!!.contentResolver
+        val children = DocumentsContract.buildChildDocumentsUriUsingTree(
+            treeUri,
+            DocumentsContract.getTreeDocumentId(treeUri)
+        )
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME
+        )
+        resolver.query(children, projection, null, null, null)?.use { cursor ->
+            val idIndex = cursor.getColumnIndexOrThrow(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID
+            )
+            val nameIndex = cursor.getColumnIndexOrThrow(
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME
+            )
+            while (cursor.moveToNext()) {
+                if (cursor.getString(nameIndex) != fileName) continue
+                val candidateUri = DocumentsContract.buildDocumentUriUsingTree(
+                    treeUri,
+                    cursor.getString(idIndex)
+                )
+                if (candidateUri != excludedUri) return true
+            }
+        }
+        return false
     }
 
     private fun findChild(treeUri: Uri, fileName: String): Uri? {
