@@ -175,16 +175,22 @@ class PhotoStorageService {
     return 'WhatsApp_${_dateStamp(note.createdAt)}_$safeIdentity$ext';
   }
 
-  Future<bool> archiveIncomingNote(Note note, ApiService api) async {
+  Future<bool> archiveIncomingNote(
+    Note note,
+    ApiService api, {
+    PhotoFolderInfo? folder,
+  }) async {
     if (note.messageType != 'image') return false;
-    if (await selectedFolder() == null) return false;
+    final selected = folder ?? await selectedFolder();
+    if (selected == null) return false;
 
     final prefs = await SharedPreferences.getInstance();
     final identity = note.messageSid.trim().isNotEmpty
         ? note.messageSid
         : note.id.toString();
     final key = '$_archivePrefix$identity';
-    if ((prefs.getString(key) ?? '').isNotEmpty) return false;
+    final archived = prefs.getString(key) ?? '';
+    if (archived.startsWith('${selected.uri}|')) return false;
 
     final bytes = await _bytesForNote(note, api);
     if (bytes == null || bytes.isEmpty) return false;
@@ -198,7 +204,7 @@ class PhotoStorageService {
     );
     if (saved == null || saved.uri.isEmpty) return false;
 
-    await prefs.setString(key, saved.uri);
+    await prefs.setString(key, '${selected.uri}|${saved.uri}');
     return true;
   }
 
@@ -207,13 +213,17 @@ class PhotoStorageService {
     ApiService api, {
     int limit = 20,
   }) async {
-    if (await selectedFolder() == null) return 0;
+    final folder = await selectedFolder();
+    if (folder == null) return 0;
 
     var saved = 0;
+    var examined = 0;
     for (final note in notes) {
-      if (saved >= limit) break;
+      if (saved >= limit || examined >= 100) break;
+      if (note.messageType != 'image') continue;
+      examined++;
       try {
-        if (await archiveIncomingNote(note, api)) saved++;
+        if (await archiveIncomingNote(note, api, folder: folder)) saved++;
       } catch (_) {
         // A later refresh retries the same photo.
       }
