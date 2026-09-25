@@ -13,6 +13,7 @@ import '../services/knowledge_pipeline.dart';
 import '../services/knowledge_store.dart';
 import '../services/note_share_service.dart';
 import '../services/remittance_sms_service.dart';
+import '../services/paypal_email_notification_service.dart';
 import 'ai_settings_page.dart';
 import 'combo_page.dart';
 import 'draft_review_page.dart';
@@ -63,6 +64,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _backgroundTickRunning = false;
   bool _replyTickRunning = false;
   final remittanceSms = RemittanceSmsService();
+  final payPalEmail = PayPalEmailNotificationService();
 
   @override
   void initState() {
@@ -114,6 +116,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final sync = PaqueteriaPurchaseSyncService(api);
       await sync.flush();
       await remittanceSms.syncPending(api);
+      await payPalEmail.syncPending(api);
 
       final latest = await api.getNotes();
       notes = latest;
@@ -151,6 +154,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
     try {
       await remittanceSms.syncPending(api);
+      await payPalEmail.syncPending(api);
       notes = await api.getNotes(query: search.text, category: category);
     } catch (e) {
       error = 'Configura el servidor para comenzar. $e';
