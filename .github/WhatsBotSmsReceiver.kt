@@ -16,7 +16,7 @@ class WhatsBotSmsReceiver : BroadcastReceiver() {
 
         val body = messages.joinToString(separator = "") { it.messageBody ?: "" }.trim()
         if (!body.startsWith("BofA:", ignoreCase = true)) return
-        if (!body.contains("le ha enviado a usted $", ignoreCase = true)) return
+        if (!body.contains("le ha enviado a usted \\$", ignoreCase = true)) return
 
         val timestamp = messages.minOfOrNull { it.timestampMillis } ?: System.currentTimeMillis()
         val address = messages.firstOrNull()?.originatingAddress ?: ""
