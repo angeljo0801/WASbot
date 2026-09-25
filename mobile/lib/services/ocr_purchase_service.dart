@@ -1,15 +1,66 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/note.dart';
 import '../models/purchase_draft.dart';
 import 'api_service.dart';
 import 'knowledge_store.dart';
+import 'ocr_natural_correction.dart';
 import 'photo_storage_service.dart';
 import 'remittance_ocr.dart';
 import 'store_ocr.dart';
+
+class OcrCorrectionApplyResult {
+  final OcrNaturalCorrection correction;
+  final int updatedCount;
+  final String confirmation;
+  final List<String> noteKeys;
+
+  const OcrCorrectionApplyResult({
+    required this.correction,
+    required this.updatedCount,
+    required this.confirmation,
+    required this.noteKeys,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'field': correction.field.name,
+        'value': correction.value,
+        'batch': correction.batch,
+        'count': correction.count,
+        'target_type': correction.targetType,
+        'updated_count': updatedCount,
+        'confirmation': confirmation,
+        'note_keys': noteKeys,
+      };
+
+  factory OcrCorrectionApplyResult.fromJson(Map<String, dynamic> json) {
+    final fieldName = (json['field'] ?? '').toString();
+    final field = OcrCorrectionField.values.firstWhere(
+      (value) => value.name == fieldName,
+      orElse: () => OcrCorrectionField.customerName,
+    );
+    final rawKeys = json['note_keys'];
+    return OcrCorrectionApplyResult(
+      correction: OcrNaturalCorrection(
+        field: field,
+        value: (json['value'] ?? '').toString(),
+        batch: json['batch'] == true,
+        count: (json['count'] as num?)?.toInt(),
+        targetType: (json['target_type'] ?? 'purchase').toString(),
+      ),
+      updatedCount: (json['updated_count'] as num?)?.toInt() ?? 0,
+      confirmation: (json['confirmation'] ?? '').toString(),
+      noteKeys: rawKeys is List
+          ? rawKeys.map((e) => e.toString()).toList()
+          : const <String>[],
+    );
+  }
+}
 
 class OcrPurchaseResult {
   final PurchaseDraft draft;
