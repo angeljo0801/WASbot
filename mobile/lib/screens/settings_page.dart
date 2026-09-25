@@ -120,6 +120,18 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> addRemittanceAgent() async {
     final normalized = widget.api.normalizePhone(newRemittanceAgent.text);
     if (normalized.isEmpty) return;
+    if (allowedNumbers.contains(normalized)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Ese número es operador administrativo. Quítalo de Números autorizados antes de registrarlo como agente de Remesas.',
+            ),
+          ),
+        );
+      }
+      return;
+    }
     final next = <String>{...remittanceAgents, normalized}.toList();
     setState(() => remittanceBusy = true);
     final saved = await widget.api.saveRemittanceAgents(next);
