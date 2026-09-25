@@ -81,7 +81,7 @@ class _ConversationsPageState extends State<ConversationsPage> {
                             child: Text(
                               name.trim().isEmpty
                                   ? '?'
-                                  : name.trim().characters.first.toUpperCase(),
+                                  : name.trim().substring(0, 1).toUpperCase(),
                             ),
                           ),
                           title: Text(name),
