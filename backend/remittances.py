@@ -295,6 +295,143 @@ def ingest_bofa_sms(text: str, received_at: str, sms_id: str = "") -> dict[str, 
         }
 
 
+def parse_paypal_email(subject: str, body: str = "") -> tuple[str, int, str] | None:
+    candidates = [subject or ""]
+    candidates.extend((body or "").replace("\r", "\n").split("\n"))
+    match = None
+    for candidate in candidates:
+        clean = " ".join(candidate.split()).strip()
+        if not clean:
+            continue
+        match = re.search(
+            r"^(.+?)\s+sent\s+you\s+\$([\d,]+(?:\.\d{1,2})?)\s+USD\b",
+            clean,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            break
+    if not match:
+        return None
+
+    name = " ".join(match.group(1).split()).strip(" .,-")
+    name = re.sub(
+        r"^(?:paypal\s*[-:|]\s*)",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    ).strip()
+    try:
+        cents = int(
+            (Decimal(match.group(2).replace(",", "")) * 100).quantize(Decimal("1"))
+        )
+    except InvalidOperation:
+        return None
+    if not name or cents <= 0:
+        return None
+
+    combined = "\n".join(x for x in [subject or "", body or ""] if x)
+    date_match = re.search(
+        r"Transaction\s+date\s*[:\-]?\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
+        combined,
+        flags=re.IGNORECASE,
+    )
+    transaction_date = date_match.group(1).strip() if date_match else ""
+    return name, cents, transaction_date
+
+def _paypal_received_at(transaction_date: str, fallback: str) -> tuple[str, str]:
+    if transaction_date:
+        try:
+            parsed = datetime.strptime(transaction_date, "%B %d, %Y")
+            local = parsed.replace(
+                hour=12,
+                minute=0,
+                second=0,
+                microsecond=0,
+                tzinfo=REMIt_TZ,
+            )
+            return local.astimezone(timezone.utc).isoformat(), local.strftime("%m/%d/%Y")
+        except ValueError:
+            pass
+    fallback = (fallback or utc_now()).strip()
+    return fallback, _display_date(fallback).split(" ")[0]
+
+
+def ingest_paypal_email(
+    subject: str,
+    body: str = "",
+    received_at: str = "",
+    email_id: str = "",
+) -> dict[str, Any] | None:
+    parsed = parse_paypal_email(subject, body)
+    if parsed is None:
+        return None
+    name, cents, transaction_date = parsed
+    stored_at, display_date = _paypal_received_at(transaction_date, received_at)
+    stable_key = email_id.strip() or hashlib.sha256(
+        f"paypal|{normalize_person_name(name)}|{cents}|{display_date}|{subject}".encode("utf-8")
+    ).hexdigest()
+    amount_text = "$" + f"{cents / 100:.2f}"
+    content = f"Nombre: {name}\nMonto: {amount_text}\nFecha: {display_date}"
+    raw = "\n".join(x for x in [subject, body] if x).strip()
+
+    with closing(db()) as conn:
+        existing = conn.execute(
+            "SELECT * FROM remittances WHERE source_key = ?",
+            (stable_key,),
+        ).fetchone()
+        if existing is not None:
+            return {
+                "id": existing["id"],
+                "name": existing["sender_name"],
+                "amount": existing["amount_cents"] / 100,
+                "received_at": existing["received_at"],
+                "duplicate": True,
+            }
+
+        cur = conn.execute(
+            """
+            INSERT INTO notes(
+                title, content, original_text, category, tags, source,
+                message_type, status, ai_source, created_at
+            ) VALUES (?, ?, ?, 'Remesas', ?, 'email_paypal', 'remittance', 'ready', 'rules', ?)
+            """,
+            (
+                f"{name} · {amount_text}",
+                content,
+                content,
+                json.dumps(["remesa", "paypal"]),
+                stored_at,
+            ),
+        )
+        note_id = int(cur.lastrowid)
+        rem = conn.execute(
+            """
+            INSERT INTO remittances(
+                sender_name, normalized_name, amount_cents, source, received_at,
+                raw_text, source_key, note_id, created_at
+            ) VALUES (?, ?, ?, 'paypal_email', ?, ?, ?, ?, ?)
+            """,
+            (
+                name,
+                normalize_person_name(name),
+                cents,
+                stored_at,
+                raw,
+                stable_key,
+                note_id,
+                utc_now(),
+            ),
+        )
+        conn.commit()
+        return {
+            "id": int(rem.lastrowid),
+            "note_id": note_id,
+            "name": name,
+            "amount": cents / 100,
+            "received_at": stored_at,
+            "duplicate": False,
+        }
+
 def _parse_agent_query(text: str) -> tuple[str, int] | None:
     raw = " ".join((text or "").split())
     amount_match = re.search(

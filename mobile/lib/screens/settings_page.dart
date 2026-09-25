@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/api_service.dart';
 import '../services/background_service.dart';
 import '../services/remittance_sms_service.dart';
+import '../services/paypal_email_notification_service.dart';
 import 'backup_page.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -14,13 +17,14 @@ class SettingsPage extends StatefulWidget {
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
-class _SettingsPageState extends State<SettingsPage> {
+class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver {
   final url = TextEditingController();
   final key = TextEditingController();
   final botNumber = TextEditingController();
   final newAllowedNumber = TextEditingController();
   final newRemittanceAgent = TextEditingController();
   final remittanceSms = RemittanceSmsService();
+  final payPalEmail = PayPalEmailNotificationService();
 
   String provider = 'twilio';
   List<String> allowedNumbers = [];
@@ -37,15 +41,25 @@ class _SettingsPageState extends State<SettingsPage> {
   String remittanceCodeDate = '';
   bool smsPermission = false;
   bool remittanceBusy = false;
+  bool paypalNotificationAccess = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     load();
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_refreshPayPalNotificationAccess(sync: true));
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     url.dispose();
     key.dispose();
     botNumber.dispose();
@@ -60,6 +74,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final remittance = await widget.api.remittanceSettings();
     final background = await WhatsBotBackgroundService.preferenceEnabled();
     final smsAllowed = await remittanceSms.hasPermission();
+    final paypalAllowed = await payPalEmail.hasAccess();
     if (!mounted) return;
     setState(() {
       url.text = s['url'] ?? '';
@@ -76,6 +91,7 @@ class _SettingsPageState extends State<SettingsPage> {
       remittanceCode = (remittance['daily_code'] ?? '').toString();
       remittanceCodeDate = (remittance['code_date'] ?? '').toString();
       smsPermission = smsAllowed;
+      paypalNotificationAccess = paypalAllowed;
       backgroundEnabled = background;
       loading = false;
     });
@@ -216,6 +232,39 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
     );
   }
+  Future<void> _refreshPayPalNotificationAccess({
+    bool sync = false,
+  }) async {
+    final allowed = await payPalEmail.hasAccess();
+    if (!mounted) return;
+    setState(() => paypalNotificationAccess = allowed);
+    if (allowed && sync) {
+      final imported = await payPalEmail.syncPending(widget.api);
+      if (!mounted) return;
+      if (imported > 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Se registraron $imported remesa(s) de PayPal.',
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> enablePayPalEmailNotifications() async {
+    final opened = await payPalEmail.openSettings();
+    if (!opened || !mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Activa WhatsBot en Acceso a notificaciones y vuelve a la app.',
+        ),
+      ),
+    );
+  }
+
   Future<void> setBackgroundEnabled(bool value) async {
     if (backgroundBusy) return;
     setState(() => backgroundBusy = true);
@@ -647,7 +696,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     ),
                     const SizedBox(height: 8),
                     const Text(
-                      'WhatsBot registra las remesas recibidas por SMS de Bank of America con nombre, monto y fecha. Los agentes de esta sección solo pueden consultar Remesas.',
+                      'WhatsBot registra las remesas recibidas por SMS de Bank of America y pagos de PayPal detectados en Gmail, guardando nombre, monto y fecha. Los agentes de esta sección solo pueden consultar Remesas.',
                     ),
                     const SizedBox(height: 16),
                     Card(
@@ -776,6 +825,33 @@ class _SettingsPageState extends State<SettingsPage> {
                             ? const Icon(Icons.check_circle_outline)
                             : TextButton(
                                 onPressed: enableRemittanceSms,
+                                child: const Text('Activar'),
+                              ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Card(
+                      child: ListTile(
+                        leading: Icon(
+                          paypalNotificationAccess
+                              ? Icons.mark_email_read_outlined
+                              : Icons.mark_email_unread_outlined,
+                        ),
+                        title: const Text('Correos de PayPal'),
+                        subtitle: Text(
+                          paypalNotificationAccess
+                              ? 'Activo. WhatsBot detecta en las notificaciones de Gmail los pagos de PayPal con el formato “nombre sent you $monto USD”.'
+                              : 'Activa el acceso a notificaciones para registrar automáticamente los pagos de PayPal que lleguen por Gmail.',
+                        ),
+                        trailing: paypalNotificationAccess
+                            ? IconButton(
+                                tooltip: 'Comprobar ahora',
+                                onPressed: () =>
+                                    _refreshPayPalNotificationAccess(sync: true),
+                                icon: const Icon(Icons.refresh),
+                              )
+                            : TextButton(
+                                onPressed: enablePayPalEmailNotifications,
                                 child: const Text('Activar'),
                               ),
                       ),

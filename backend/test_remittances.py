@@ -71,6 +71,67 @@ duplicate = remittances.ingest_bofa_sms(
 )
 assert duplicate is not None and duplicate['duplicate'] is True
 
+paypal_subject = 'Alexandre Adam-tremblay sent you $158.99 USD'
+paypal_body = '''
+Hello, Ana Escobedo
+
+Alexandre Adam-tremblay sent you $158.99 USD
+
+Amount
+$158.99 USD
+Transaction date
+September 23, 2026
+Transaction ID
+1RE69330C8626300T
+
+Smart money tip
+Now earn 5% cash back in a monthly category you choose with PayPal Debit.
+'''
+
+paypal_parsed = remittances.parse_paypal_email(paypal_subject, paypal_body)
+assert paypal_parsed == (
+    'Alexandre Adam-tremblay',
+    15899,
+    'September 23, 2026',
+), paypal_parsed
+
+paypal_saved = remittances.ingest_paypal_email(
+    paypal_subject,
+    paypal_body,
+    '2026-09-24T14:00:00Z',
+    'paypal-test-1',
+)
+assert paypal_saved is not None
+assert paypal_saved['amount'] == 158.99
+
+with remittances.db() as conn:
+    paypal_note = conn.execute(
+        'SELECT * FROM notes WHERE id = ?',
+        (paypal_saved['note_id'],),
+    ).fetchone()
+    paypal_record = conn.execute(
+        'SELECT * FROM remittances WHERE id = ?',
+        (paypal_saved['id'],),
+    ).fetchone()
+
+assert paypal_note['category'] == 'Remesas'
+assert paypal_note['source'] == 'email_paypal'
+assert paypal_note['message_type'] == 'remittance'
+assert 'Nombre: Alexandre Adam-tremblay' in paypal_note['content']
+assert 'Monto: $158.99' in paypal_note['content']
+assert 'Fecha: 09/23/2026' in paypal_note['content']
+assert 'Transaction ID' not in paypal_note['content']
+assert 'Smart money tip' not in paypal_note['content']
+assert paypal_record['source'] == 'paypal_email'
+assert '1RE69330C8626300T' in paypal_record['raw_text']
+
+paypal_duplicate = remittances.ingest_paypal_email(
+    paypal_subject,
+    paypal_body,
+    '2026-09-24T14:00:00Z',
+    'paypal-test-1',
+)
+assert paypal_duplicate is not None and paypal_duplicate['duplicate'] is True
 agents = remittances.set_agents(['+1 (772) 555-0123'])
 assert agents == ['+17725550123']
 code, day = remittances.ensure_daily_code()
