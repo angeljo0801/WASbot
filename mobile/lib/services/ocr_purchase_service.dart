@@ -395,6 +395,114 @@ class OcrPurchaseService {
     return file.path;
   }
 
+  Future<LocalPurchaseOcrResult?> parseLocalPurchaseImage(
+    String path,
+  ) async {
+    final file = File(path);
+    if (!await file.exists()) return null;
+    final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
+    String text = '';
+    try {
+      final recognized =
+          await recognizer.processImage(InputImage.fromFilePath(path));
+      text = recognized.text.trim();
+    } finally {
+      await recognizer.close();
+    }
+    var parsed = StoreOcrParser.parse(text);
+    parsed = await _applyStoreLearning(parsed);
+    return LocalPurchaseOcrResult(parsed: parsed, text: text);
+  }
+
+  Future<PurchaseDraft> createDraftFromCombinedNote(Note note) async {
+    final attachments = note.photoPaths
+        .where((path) => path.trim().isNotEmpty && File(path).existsSync())
+        .toList();
+
+    var parsed = StoreOcrParser.parse(note.content);
+    parsed = await _applyStoreLearning(parsed);
+    var ocrText = note.content;
+    String mediaPath = '';
+
+    if (attachments.length == 1) {
+      final imageResult = await parseLocalPurchaseImage(attachments.first);
+      if (imageResult != null) {
+        final imageParsed = imageResult.parsed;
+        parsed = StoreOcrParse(
+          store: imageParsed.store != 'Otra tienda'
+              ? imageParsed.store
+              : parsed.store,
+          orderNumber: imageParsed.orderNumber.trim().isNotEmpty
+              ? imageParsed.orderNumber
+              : parsed.orderNumber,
+          total: imageParsed.total > 0 ? imageParsed.total : parsed.total,
+          subtotal:
+              imageParsed.subtotal > 0 ? imageParsed.subtotal : parsed.subtotal,
+          tax: imageParsed.tax > 0 ? imageParsed.tax : parsed.tax,
+          shipping: imageParsed.shipping > 0
+              ? imageParsed.shipping
+              : parsed.shipping,
+          discount: imageParsed.discount > 0
+              ? imageParsed.discount
+              : parsed.discount,
+          expectedItemCount:
+              imageParsed.expectedItemCount ?? parsed.expectedItemCount,
+          items: imageParsed.items.isNotEmpty ? imageParsed.items : parsed.items,
+          warnings: <String>[...parsed.warnings, ...imageParsed.warnings],
+          confidence: imageParsed.confidence > parsed.confidence
+              ? imageParsed.confidence
+              : parsed.confidence,
+        );
+        ocrText = imageResult.text;
+        mediaPath = attachments.first;
+      }
+    }
+
+    final customer = await _resolveCustomerFromOcr(note.content);
+    final now = DateTime.now();
+    final draft = PurchaseDraft(
+      id: 'draft_combined_' +
+          KnowledgeStore.noteKey(note)
+              .replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_'),
+      noteKey: KnowledgeStore.noteKey(note),
+      customerName: note.customerName.trim().isNotEmpty
+          ? note.customerName
+          : (customer['name'] ?? ''),
+      customerPhone: note.customerPhone.trim().isNotEmpty
+          ? note.customerPhone
+          : (customer['phone'] ?? ''),
+      store: parsed.store,
+      orderNumber: parsed.orderNumber,
+      description: parsed.items.isNotEmpty
+          ? parsed.items
+              .take(5)
+              .map((item) => (item['name'] ?? '').toString())
+              .where((value) => value.isNotEmpty)
+              .join(', ')
+          : note.title,
+      total: parsed.total,
+      subtotal: parsed.subtotal,
+      tax: parsed.tax,
+      shipping: parsed.shipping,
+      discount: parsed.discount,
+      items: parsed.items,
+      ocrText: ocrText,
+      confidence: parsed.confidence,
+      warnings: <String>[
+        ...parsed.warnings,
+        if (attachments.length > 1)
+          'Hay varias imágenes adjuntas. Selecciona una si quieres ejecutar OCR sobre una foto específica.',
+      ],
+      mediaPath: mediaPath,
+      attachmentPaths: attachments,
+      status: 'pending',
+      createdAt: now,
+      updatedAt: now,
+    );
+    await store.saveDraft(draft);
+    await store.syncOcrKeyEntities(draft);
+    return draft;
+  }
   String _remittanceContent(PurchaseDraft draft) {
     final lines = <String>['Origen: ${draft.remittanceSource}'];
     if (draft.customerName.trim().isNotEmpty) {
