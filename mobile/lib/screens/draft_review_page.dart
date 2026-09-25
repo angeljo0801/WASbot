@@ -35,6 +35,8 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
   late List<Map<String, dynamic>> items;
   List<Map<String, dynamic>> clients = <Map<String, dynamic>>[];
   bool saving = false;
+  bool sharing = false;
+  bool confirmedLocally = false;
   bool clientsLoading = true;
   bool ambiguityPrompted = false;
   String? clientHint;
@@ -57,6 +59,7 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
     );
     items = d.items.map((e) => Map<String, dynamic>.from(e)).toList();
     selectedOcrPath = d.mediaPath;
+    confirmedLocally = d.status.startsWith('confirmed');
     WidgetsBinding.instance.addPostFrameCallback((_) => _loadClients());
   }
 
@@ -276,7 +279,8 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
         total: _money(total.text),
         items: items,
         mediaPath: selectedOcrPath,
-        status: status,
+        status: status ??
+            (confirmedLocally ? 'confirmed' : widget.draft.status),
       );
 
   List<String> get _attachmentPaths {
@@ -532,71 +536,80 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
     );
   }
 
-  Future<void> _confirm() async {
-    if (saving) return;
-
+  Future<bool> _resolveClientBeforeConfirm() async {
     final currentName = customer.text.trim();
-    if (currentName.isNotEmpty && clients.isNotEmpty) {
-      final matches = _matchesForName(currentName);
-      if (matches.length > 1 && !_phoneMatchesOne(matches)) {
-        await _chooseClient(initialQuery: currentName, ambiguous: true);
-        final after = _matchesForName(customer.text.trim());
-        if (after.length > 1 && !_phoneMatchesOne(after)) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text(
-                  'Elige cuál cliente es antes de confirmar el pedido.',
-                ),
+    if (currentName.isEmpty || clients.isEmpty) return true;
+
+    final matches = _matchesForName(currentName);
+    if (matches.length > 1 && !_phoneMatchesOne(matches)) {
+      await _chooseClient(initialQuery: currentName, ambiguous: true);
+      final after = _matchesForName(customer.text.trim());
+      if (after.length > 1 && !_phoneMatchesOne(after)) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Elige cuál cliente es antes de confirmar el pedido.',
               ),
-            );
-          }
-          return;
+            ),
+          );
         }
-      } else if (matches.length == 1 && phone.text.trim().isEmpty) {
-        _applyClient(matches.first);
+        return false;
       }
+    } else if (matches.length == 1 && phone.text.trim().isEmpty) {
+      _applyClient(matches.first);
     }
+    return true;
+  }
+
+  Future<void> _learnConfirmedCorrections(PurchaseDraft draft) async {
+    Future<void> learn(
+      String field,
+      String original,
+      String corrected,
+    ) async {
+      if (original.trim().isEmpty ||
+          corrected.trim().isEmpty ||
+          original.trim() == corrected.trim()) {
+        return;
+      }
+      await widget.api.recordOcrCorrection(
+        source: widget.draft.store,
+        field: field,
+        original: original,
+        corrected: corrected,
+      );
+    }
+
+    await learn(
+      'total',
+      widget.draft.total > 0 ? widget.draft.total.toStringAsFixed(2) : '',
+      draft.total > 0 ? draft.total.toStringAsFixed(2) : '',
+    );
+    await learn(
+      'customer_name',
+      widget.draft.customerName,
+      draft.customerName,
+    );
+    await learn(
+      'order_number',
+      widget.draft.orderNumber,
+      draft.orderNumber,
+    );
+  }
+
+  Future<void> _confirm() async {
+    if (saving || sharing) return;
+    if (!await _resolveClientBeforeConfirm()) return;
 
     setState(() => saving = true);
     try {
       final draft = _current(status: 'confirmed').copyWith(
         attachmentPaths: _attachmentPaths,
+        updatedAt: DateTime.now(),
       );
 
-      Future<void> learn(
-        String field,
-        String original,
-        String corrected,
-      ) async {
-        if (original.trim().isEmpty ||
-            corrected.trim().isEmpty ||
-            original.trim() == corrected.trim()) {
-          return;
-        }
-        await widget.api.recordOcrCorrection(
-          source: widget.draft.store,
-          field: field,
-          original: original,
-          corrected: corrected,
-        );
-      }
-
-      await learn(
-        'total',
-        widget.draft.total > 0 ? widget.draft.total.toStringAsFixed(2) : '',
-        draft.total > 0 ? draft.total.toStringAsFixed(2) : '',
-      );
-      await learn(
-        'customer_name',
-        widget.draft.customerName,
-        draft.customerName,
-      );
-      await learn(
-        'order_number',
-        widget.draft.orderNumber,
-        draft.orderNumber,
-      );
+      await _learnConfirmedCorrections(draft);
       await store.saveDraft(draft);
       await store.syncOcrKeyEntities(draft);
 
@@ -611,6 +624,46 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
         orderNumber: draft.orderNumber,
         draftId: draft.id,
       );
+
+      if (!mounted) return;
+      setState(() => confirmedLocally = true);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Compra confirmada. Ahora puedes compartirla con Paquetería.',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('No se pudo confirmar: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => saving = false);
+    }
+  }
+
+  Future<void> _shareWithPaqueteria() async {
+    if (saving || sharing) return;
+    if (!confirmedLocally) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Confirma primero la compra.'),
+        ),
+      );
+      return;
+    }
+
+    setState(() => sharing = true);
+    try {
+      final draft = _current(status: 'confirmed').copyWith(
+        attachmentPaths: _attachmentPaths,
+        updatedAt: DateTime.now(),
+      );
+      await store.saveDraft(draft);
+      await store.syncOcrKeyEntities(draft);
 
       final sync = PaqueteriaPurchaseSyncService(widget.api);
       final share = await sync.enqueue(
@@ -655,7 +708,7 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
             title: const Text('Pendiente de compartir'),
             content: Text(
               share.message +
-                  '\n\nLa compra quedó guardada y WhatsBot volverá a intentarlo automáticamente.',
+                  '\n\nLa compra sigue confirmada y WhatsBot volverá a intentarlo automáticamente.',
             ),
             actions: [
               FilledButton(
@@ -701,11 +754,11 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('No se pudo confirmar: $e')),
+          SnackBar(content: Text('No se pudo compartir: $e')),
         );
       }
     } finally {
-      if (mounted) setState(() => saving = false);
+      if (mounted) setState(() => sharing = false);
     }
   }
 
@@ -741,10 +794,20 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
           children: [
             Card(
               child: ListTile(
-                leading: const Icon(Icons.auto_awesome),
-                title: const Text('Pendiente de confirmar'),
+                leading: Icon(
+                  confirmedLocally
+                      ? Icons.check_circle_outline
+                      : Icons.auto_awesome,
+                ),
+                title: Text(
+                  confirmedLocally
+                      ? 'Compra confirmada'
+                      : 'Pendiente de confirmar',
+                ),
                 subtitle: Text(
-                  'OCR automático · confianza $confidence%. Nada se envía a Paquetería hasta que confirmes.',
+                  confirmedLocally
+                      ? 'La compra está confirmada en WhatsBot. Compartir con Paquetería es una acción separada.'
+                      : 'OCR automático · confianza $confidence%. Confirmar guarda la compra en WhatsBot; no la comparte con Paquetería.',
                 ),
               ),
             ),
@@ -1048,7 +1111,7 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
             ),
             const SizedBox(height: 10),
             FilledButton.icon(
-              onPressed: saving ? null : _confirm,
+              onPressed: saving || sharing ? null : _confirm,
               icon: saving
                   ? const SizedBox.square(
                       dimension: 18,
@@ -1056,11 +1119,30 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
                     )
                   : const Icon(Icons.check_circle_outline),
               label: Text(
-                saving ? 'Compartiendo…' : 'Confirmar y compartir con Paquetería',
+                saving
+                    ? 'Confirmando…'
+                    : confirmedLocally
+                        ? 'Confirmar cambios'
+                        : 'Confirmar compra',
+              ),
+            ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: confirmedLocally && !saving && !sharing
+                  ? _shareWithPaqueteria
+                  : null,
+              icon: sharing
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.send_outlined),
+              label: Text(
+                sharing ? 'Compartiendo…' : 'Compartir con Paquetería',
               ),
             ),
             TextButton(
-              onPressed: saving ? null : _discard,
+              onPressed: saving || sharing ? null : _discard,
               child: const Text('Descartar borrador'),
             ),
           ],
