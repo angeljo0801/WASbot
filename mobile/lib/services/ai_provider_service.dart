@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/note.dart';
+import 'ocr_natural_correction.dart';
 import 'local_ai_service.dart';
 
 class AiProvider {
@@ -276,6 +277,44 @@ class AiProviderService {
       system: system,
       prompt: prompt,
     );
+  }
+
+  Future<OcrNaturalCorrection?> interpretOcrCorrection(
+    String message,
+  ) async {
+    final s = await settings();
+    if (s.provider == AiProvider.rules || message.trim().isEmpty) return null;
+    const system =
+        'Interpreta una instrucción privada de WhatsBot sobre corregir datos OCR. '
+        'Devuelve SOLO JSON o null. JSON: {"is_correction":true,"field":"customerName|total|store|orderNumber|description|remittanceDate|remittanceSource","value":"...","batch":true|false,"count":numero_o_null,"target_type":"purchase|remittance"}. '
+        'Solo marca corrección si el usuario claramente quiere cambiar/asignar un dato de una compra, pedido, foto OCR o remesa. '
+        'Frases libres como "esas dos capturas son realmente de María" deben interpretarse. No inventes valores.';
+    final raw = await ask(
+      system: system,
+      prompt: message,
+      maxTokens: 220,
+      temperature: 0.0,
+    );
+    final trimmed = raw.trim();
+    if (trimmed == 'null' || trimmed.isEmpty) return null;
+    dynamic data;
+    try {
+      data = jsonDecode(trimmed);
+    } catch (_) {
+      final start = trimmed.indexOf('{');
+      final end = trimmed.lastIndexOf('}');
+      if (start >= 0 && end > start) {
+        try {
+          data = jsonDecode(trimmed.substring(start, end + 1));
+        } catch (_) {}
+      }
+    }
+    if (data is! Map || data['is_correction'] != true) return null;
+    final correction = OcrNaturalCorrection.fromJson(
+      Map<String, dynamic>.from(data),
+    );
+    if (correction.value.trim().isEmpty) return null;
+    return correction;
   }
 
   Future<String> replyToWhatsapp(Note note) async {
