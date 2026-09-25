@@ -1117,7 +1117,7 @@ async def twilio_whatsapp_webhook(request: Request) -> Response:
     if not allowed_now and not remittance_agent:
         return Response(content=str(MessagingResponse()), media_type="application/xml")
 
-    if remittance_agent and not operator:
+    if remittance_agent:
         response = MessagingResponse()
         response.message(handle_remittance_agent_message(sender, body))
         return Response(content=str(response), media_type="application/xml")
