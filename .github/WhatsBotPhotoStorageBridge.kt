@@ -14,21 +14,21 @@ object WhatsBotPhotoStorageBridge {
     private const val CHANNEL = "com.whatsbot.whatsbot/photo_storage"
     private const val REQUEST_FOLDER = 48321
     private const val PREFS = "whatsbot_photo_storage"
-    private const val KEY_URI = "tree_uri"
-    private const val KEY_LABEL = "tree_label"
 
     private var activity: Activity? = null
     private var pendingResult: MethodChannel.Result? = null
+    private var pendingKind: String? = null
 
     fun register(activity: Activity, messenger: BinaryMessenger) {
         this.activity = activity
         MethodChannel(messenger, CHANNEL).setMethodCallHandler { call, result ->
             try {
+                val kind = normalizeKind(call.argument<String>("kind"))
                 when (call.method) {
-                    "getFolder" -> result.success(currentFolder())
-                    "selectFolder" -> selectFolder(result)
+                    "getFolder" -> result.success(currentFolder(kind))
+                    "selectFolder" -> selectFolder(kind, result)
                     "clearFolder" -> {
-                        clearFolder()
+                        clearFolder(kind)
                         result.success(true)
                     }
                     "writeImage" -> {
@@ -37,7 +37,9 @@ object WhatsBotPhotoStorageBridge {
                         val mimeType = call.argument<String>("mimeType") ?: "image/jpeg"
                         val bytes = call.argument<ByteArray>("bytes") ?: ByteArray(0)
                         val overwrite = call.argument<Boolean>("overwrite") ?: true
-                        result.success(writeImage(fileName, mimeType, bytes, overwrite))
+                        result.success(
+                            writeImage(kind, fileName, mimeType, bytes, overwrite)
+                        )
                     }
                     else -> result.notImplemented()
                 }
@@ -53,21 +55,32 @@ object WhatsBotPhotoStorageBridge {
 
     private fun prefs() = activity!!.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    private fun currentFolder(): Map<String, Any?>? {
-        val raw = prefs().getString(KEY_URI, "") ?: ""
+    private fun normalizeKind(raw: String?): String {
+        return when ((raw ?: "").lowercase()) {
+            "remittances", "remesas" -> "remittances"
+            else -> "purchases"
+        }
+    }
+
+    private fun uriKey(kind: String) = "tree_uri_" + kind
+    private fun labelKey(kind: String) = "tree_label_" + kind
+
+    private fun currentFolder(kind: String): Map<String, Any?>? {
+        val raw = prefs().getString(uriKey(kind), "") ?: ""
         if (raw.isBlank()) return null
         val uri = Uri.parse(raw)
         return mapOf(
+            "kind" to kind,
             "uri" to raw,
             "label" to (
-                prefs().getString(KEY_LABEL, "")?.takeIf { it.isNotBlank() }
+                prefs().getString(labelKey(kind), "")?.takeIf { it.isNotBlank() }
                     ?: queryName(uri)
                     ?: "Carpeta seleccionada"
             )
         )
     }
 
-    private fun selectFolder(result: MethodChannel.Result) {
+    private fun selectFolder(kind: String, result: MethodChannel.Result) {
         if (pendingResult != null) {
             result.error(
                 "PHOTO_STORAGE_BUSY",
@@ -79,6 +92,7 @@ object WhatsBotPhotoStorageBridge {
         val host = activity
             ?: throw IllegalStateException("WhatsBot no tiene una actividad disponible.")
         pendingResult = result
+        pendingKind = kind
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
             addFlags(
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or
@@ -93,7 +107,9 @@ object WhatsBotPhotoStorageBridge {
     fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
         if (requestCode != REQUEST_FOLDER) return false
         val result = pendingResult ?: return true
+        val kind = pendingKind ?: "purchases"
         pendingResult = null
+        pendingKind = null
 
         if (resultCode != Activity.RESULT_OK) {
             result.success(null)
@@ -114,34 +130,53 @@ object WhatsBotPhotoStorageBridge {
         try {
             activity?.contentResolver?.takePersistableUriPermission(uri, flags)
         } catch (_: SecurityException) {
-            // Some document providers grant usable access without persistence.
         }
 
+        val old = prefs().getString(uriKey(kind), "") ?: ""
         val label = queryName(uri) ?: "Carpeta seleccionada"
         prefs().edit()
-            .putString(KEY_URI, uri.toString())
-            .putString(KEY_LABEL, label)
+            .putString(uriKey(kind), uri.toString())
+            .putString(labelKey(kind), label)
             .apply()
 
-        result.success(mapOf("uri" to uri.toString(), "label" to label))
+        if (old.isNotBlank() && old != uri.toString() && !isUriUsedByOtherKind(old, kind)) {
+            releasePermission(old)
+        }
+
+        result.success(
+            mapOf("kind" to kind, "uri" to uri.toString(), "label" to label)
+        )
         return true
     }
 
-    private fun clearFolder() {
-        val raw = prefs().getString(KEY_URI, "") ?: ""
-        if (raw.isNotBlank()) {
-            try {
-                activity?.contentResolver?.releasePersistableUriPermission(
-                    Uri.parse(raw),
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                )
-            } catch (_: Exception) {}
+    private fun clearFolder(kind: String) {
+        val raw = prefs().getString(uriKey(kind), "") ?: ""
+        prefs().edit().remove(uriKey(kind)).remove(labelKey(kind)).apply()
+        if (raw.isNotBlank() && !isUriUsedByOtherKind(raw, kind)) {
+            releasePermission(raw)
         }
-        prefs().edit().remove(KEY_URI).remove(KEY_LABEL).apply()
+    }
+
+    private fun isUriUsedByOtherKind(rawUri: String, excludingKind: String): Boolean {
+        for (kind in listOf("purchases", "remittances")) {
+            if (kind == excludingKind) continue
+            if ((prefs().getString(uriKey(kind), "") ?: "") == rawUri) return true
+        }
+        return false
+    }
+
+    private fun releasePermission(rawUri: String) {
+        try {
+            activity?.contentResolver?.releasePersistableUriPermission(
+                Uri.parse(rawUri),
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        } catch (_: Exception) {}
     }
 
     private fun writeImage(
+        kind: String,
         fileName: String,
         mimeType: String,
         bytes: ByteArray,
@@ -151,9 +186,10 @@ object WhatsBotPhotoStorageBridge {
             throw IllegalArgumentException("La imagen está vacía.")
         }
 
-        val raw = prefs().getString(KEY_URI, "") ?: ""
+        val raw = prefs().getString(uriKey(kind), "") ?: ""
         if (raw.isBlank()) {
-            throw IllegalStateException("Primero selecciona una carpeta para las fotos.")
+            val label = if (kind == "remittances") "Remesas" else "Compras"
+            throw IllegalStateException("Primero selecciona la carpeta de " + label + ".")
         }
 
         val treeUri = Uri.parse(raw)
@@ -181,10 +217,11 @@ object WhatsBotPhotoStorageBridge {
         } ?: throw IllegalStateException("No se pudo escribir la imagen.")
 
         return mapOf(
+            "kind" to kind,
             "uri" to target.toString(),
             "name" to (queryName(target) ?: safeName),
             "folder" to (
-                prefs().getString(KEY_LABEL, "")?.takeIf { it.isNotBlank() }
+                prefs().getString(labelKey(kind), "")?.takeIf { it.isNotBlank() }
                     ?: "Carpeta seleccionada"
             )
         )
@@ -225,7 +262,7 @@ object WhatsBotPhotoStorageBridge {
         val ext = if (dot > 0) original.substring(dot) else ""
         var index = 2
         while (true) {
-            val candidate = "${stem}_${index}${ext}"
+            val candidate = stem + "_" + index + ext
             if (findChild(treeUri, candidate) == null) return candidate
             index++
         }
@@ -236,7 +273,11 @@ object WhatsBotPhotoStorageBridge {
             .replace(Regex("[\\/:*?\"<>|]"), "_")
             .trim()
             .take(180)
-        return if (clean.isBlank()) "WhatsBot_${System.currentTimeMillis()}.jpg" else clean
+        return if (clean.isBlank()) {
+            "WhatsBot_" + System.currentTimeMillis() + ".jpg"
+        } else {
+            clean
+        }
     }
 
     private fun queryName(uri: Uri): String? {
