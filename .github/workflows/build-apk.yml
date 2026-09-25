@@ -11,6 +11,8 @@ on:
       - '.github/WhatsBotMainActivity.kt'
       - '.github/WhatsBotSmsReceiver.kt'
       - '.github/WhatsBotSmsBridge.kt'
+      - '.github/WhatsBotPayPalNotificationListener.kt'
+      - '.github/WhatsBotPayPalEmailBridge.kt'
       - '.github/workflows/build-apk.yml'
 
 permissions:
@@ -64,6 +66,8 @@ jobs:
           cp ../.github/WhatsBotMainActivity.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/MainActivity.kt
           cp ../.github/WhatsBotSmsReceiver.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotSmsReceiver.kt
           cp ../.github/WhatsBotSmsBridge.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotSmsBridge.kt
+          cp ../.github/WhatsBotPayPalNotificationListener.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotPayPalNotificationListener.kt
+          cp ../.github/WhatsBotPayPalEmailBridge.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotPayPalEmailBridge.kt
 
           normalize_secret() {
             local name="$1"
@@ -192,6 +196,18 @@ jobs:
               </receiver>
           '''
               x = x.replace('    </application>', receiver + '    </application>', 1)
+          if 'WhatsBotPayPalNotificationListener' not in x:
+              paypal_listener = '''        <service
+                  android:name=".WhatsBotPayPalNotificationListener"
+                  android:label="WhatsBot PayPal"
+                  android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+                  android:exported="true">
+                  <intent-filter>
+                      <action android:name="android.service.notification.NotificationListenerService" />
+                  </intent-filter>
+              </service>
+          '''
+              x = x.replace('    </application>', paypal_listener + '    </application>', 1)
           manifest.write_text(x)
           PY
 
