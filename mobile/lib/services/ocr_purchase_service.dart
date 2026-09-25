@@ -62,6 +62,16 @@ class OcrCorrectionApplyResult {
   }
 }
 
+class LocalPurchaseOcrResult {
+  final StoreOcrParse parsed;
+  final String text;
+
+  const LocalPurchaseOcrResult({
+    required this.parsed,
+    required this.text,
+  });
+}
+
 class OcrPurchaseResult {
   final PurchaseDraft draft;
   final String ocrText;
