@@ -150,7 +150,7 @@ class KnowledgePipeline {
 
       if (note.messageType == 'text' || note.originalText.trim().isNotEmpty) {
         try {
-          await ocr.applyCustomerCorrection(
+          await ocr.applyNaturalLanguageCorrection(
             note.originalText.trim().isNotEmpty
                 ? note.originalText
                 : note.content,
