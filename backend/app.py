@@ -209,8 +209,10 @@ def get_config(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
             "remittance_agents": remittance_agents,
             "whatsapp_connected": bool(
                 TWILIO_ACCOUNT_SID
-                and TWILIO_API_KEY_SID
-                and TWILIO_API_SECRET
+                and (
+                    (TWILIO_API_KEY_SID and TWILIO_API_SECRET)
+                    or TWILIO_AUTH_TOKEN
+                )
                 and (raw.get("bot_number") or TWILIO_WHATSAPP_FROM)
             ),
         }
@@ -246,12 +248,19 @@ def note_row(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def twilio_client() -> Client:
-    if not (TWILIO_ACCOUNT_SID and TWILIO_API_KEY_SID and TWILIO_API_SECRET):
-        raise HTTPException(status_code=503, detail="Twilio credentials are not configured")
-    return Client(
-        TWILIO_API_KEY_SID,
-        TWILIO_API_SECRET,
-        TWILIO_ACCOUNT_SID,
+    if not TWILIO_ACCOUNT_SID:
+        raise HTTPException(status_code=503, detail="Twilio Account SID is not configured")
+    if TWILIO_API_KEY_SID and TWILIO_API_SECRET:
+        return Client(
+            TWILIO_API_KEY_SID,
+            TWILIO_API_SECRET,
+            TWILIO_ACCOUNT_SID,
+        )
+    if TWILIO_AUTH_TOKEN:
+        return Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    raise HTTPException(
+        status_code=503,
+        detail="Twilio API key or Auth Token is not configured",
     )
 
 
@@ -688,7 +697,11 @@ def health() -> dict[str, Any]:
         "ok": True,
         "service": "WhatsBot",
         "twilio_configured": bool(
-            TWILIO_ACCOUNT_SID and TWILIO_API_KEY_SID and TWILIO_API_SECRET
+            TWILIO_ACCOUNT_SID
+            and (
+                (TWILIO_API_KEY_SID and TWILIO_API_SECRET)
+                or TWILIO_AUTH_TOKEN
+            )
         ),
     }
 
