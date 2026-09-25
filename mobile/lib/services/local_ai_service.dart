@@ -275,8 +275,12 @@ class LocalAiService {
       'Inbox', 'Clientes', 'Trabajo', 'Personal', 'Compras', 'Gastos',
       'Ideas', 'Documentos', 'Recordatorios', 'Fotos'
     };
-    final rawCategory = (data['category'] ?? 'Inbox').toString();
-    final category = categories.contains(rawCategory) ? rawCategory : 'Inbox';
+    final rawCategory = (data['category'] ?? note.category).toString();
+    final category = note.messageType == 'contact'
+        ? 'Clientes'
+        : categories.contains(rawCategory)
+            ? rawCategory
+            : note.category;
     final rawTags = data['tags'];
     final tags = rawTags is List
         ? rawTags.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).take(6).toList()

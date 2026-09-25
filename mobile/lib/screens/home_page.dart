@@ -11,6 +11,7 @@ import '../services/paqueteria_purchase_sync_service.dart';
 import '../services/embedding_service.dart';
 import '../services/knowledge_pipeline.dart';
 import '../services/knowledge_store.dart';
+import '../services/note_share_service.dart';
 import 'ai_settings_page.dart';
 import 'combo_page.dart';
 import 'draft_review_page.dart';
@@ -53,6 +54,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int knowledgeTotal = 0;
   String knowledgeLabel = '';
   String? error;
+  final Set<int> selectedNoteIds = <int>{};
+  bool shareWorking = false;
   Timer? _backgroundTimer;
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
   bool _backgroundTickRunning = false;
@@ -165,8 +168,49 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _runPostRefreshIntelligence() async {
+    await _repairContactCategories();
     await _processPendingAi();
     await _processKnowledge();
+  }
+
+  Future<void> _repairContactCategories() async {
+    final misplaced = notes
+        .where(
+          (note) =>
+              note.source == 'whatsapp' &&
+              note.messageType == 'contact' &&
+              note.category != 'Clientes',
+        )
+        .take(50)
+        .toList();
+    if (misplaced.isEmpty) return;
+
+    var changed = false;
+    for (final note in misplaced) {
+      try {
+        final tags = <String>{
+          ...note.tags,
+          'contacto',
+          'cliente',
+          'whatsapp',
+        }.toList();
+        await api.updateNoteManual(
+          note,
+          category: 'Clientes',
+          tags: tags,
+        );
+        changed = true;
+      } catch (_) {
+        // Keep the contact pending; a later refresh will retry.
+      }
+    }
+
+    if (changed) {
+      final refreshed =
+          await api.getNotes(query: search.text, category: category);
+      notes = refreshed;
+      if (mounted) setState(() {});
+    }
   }
 
   Future<void> _processKnowledge() async {
@@ -236,6 +280,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       for (final note in candidates) {
         try {
+          if (note.messageType == 'contact') {
+            final tags = <String>{
+              ...note.tags,
+              'contacto',
+              'cliente',
+              'whatsapp',
+            }.toList();
+            await api.updateNoteFromAi(
+              id: note.id,
+              title: note.title,
+              content: note.content,
+              category: 'Clientes',
+              tags: tags,
+              aiProvider: sourceId,
+            );
+            continue;
+          }
+
           final organized = await ai.organize(note);
           await api.updateNoteFromAi(
             id: note.id,
@@ -267,6 +329,46 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (mounted) await refresh(runLocalAi: false);
     } finally {
       if (mounted) setState(() => aiRunning = false);
+    }
+  }
+
+  bool get selectionMode => selectedNoteIds.isNotEmpty;
+
+  void _toggleSelection(Note note) {
+    setState(() {
+      if (!selectedNoteIds.add(note.id)) {
+        selectedNoteIds.remove(note.id);
+      }
+    });
+  }
+
+  void _clearSelection() {
+    if (selectedNoteIds.isEmpty) return;
+    setState(selectedNoteIds.clear);
+  }
+
+  Future<void> _shareSelected() async {
+    if (shareWorking || selectedNoteIds.isEmpty) return;
+    final selected = notes
+        .where((note) => selectedNoteIds.contains(note.id))
+        .toList();
+    if (selected.isEmpty) {
+      _clearSelection();
+      return;
+    }
+
+    setState(() => shareWorking = true);
+    try {
+      await NoteShareService(api).shareNotes(selected);
+      if (mounted) _clearSelection();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('No se pudieron compartir los archivos: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => shareWorking = false);
     }
   }
 
@@ -328,8 +430,32 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('WhatsBot'),
-        actions: [
+        leading: selectionMode
+            ? IconButton(
+                tooltip: 'Cancelar selección',
+                onPressed: _clearSelection,
+                icon: const Icon(Icons.close),
+              )
+            : null,
+        title: Text(
+          selectionMode
+              ? '${selectedNoteIds.length} seleccionado(s)'
+              : 'WhatsBot',
+        ),
+        actions: selectionMode
+            ? [
+                IconButton(
+                  tooltip: 'Compartir seleccionados',
+                  onPressed: shareWorking ? null : _shareSelected,
+                  icon: shareWorking
+                      ? const SizedBox.square(
+                          dimension: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.share_outlined),
+                ),
+              ]
+            : [
           IconButton(
             tooltip: 'Chat con tus notas',
             onPressed: () => Navigator.push(
@@ -399,11 +525,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: add,
-        icon: const Icon(Icons.add),
-        label: const Text('Nota'),
-      ),
+      floatingActionButton: selectionMode
+          ? null
+          : FloatingActionButton.extended(
+              onPressed: add,
+              icon: const Icon(Icons.add),
+              label: const Text('Nota'),
+            ),
       body: RefreshIndicator(
         onRefresh: refresh,
         child: ListView(
@@ -557,7 +685,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               (n) => Card(
                 child: ListTile(
                   contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  leading: CircleAvatar(child: Icon(typeIcon(n))),
+                  selected: selectedNoteIds.contains(n.id),
+                  leading: CircleAvatar(
+                    child: Icon(
+                      selectionMode && selectedNoteIds.contains(n.id)
+                          ? Icons.check
+                          : typeIcon(n),
+                    ),
+                  ),
                   title: Text(n.title, maxLines: 2, overflow: TextOverflow.ellipsis),
                   subtitle: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -581,13 +716,28 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       ),
                     ],
                   ),
-                  trailing: PopupMenuButton<String>(
-                    onSelected: (v) {
-                      if (v == 'delete') remove(n);
-                    },
-                    itemBuilder: (_) => const [PopupMenuItem(value: 'delete', child: Text('Borrar'))],
-                  ),
+                  trailing: selectionMode
+                      ? Checkbox(
+                          value: selectedNoteIds.contains(n.id),
+                          onChanged: (_) => _toggleSelection(n),
+                        )
+                      : PopupMenuButton<String>(
+                          onSelected: (v) {
+                            if (v == 'delete') remove(n);
+                          },
+                          itemBuilder: (_) => const [
+                            PopupMenuItem(
+                              value: 'delete',
+                              child: Text('Borrar'),
+                            ),
+                          ],
+                        ),
+                  onLongPress: () => _toggleSelection(n),
                   onTap: () async {
+                    if (selectionMode) {
+                      _toggleSelection(n);
+                      return;
+                    }
                     await Navigator.push(
                       context,
                       MaterialPageRoute(

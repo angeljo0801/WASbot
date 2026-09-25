@@ -425,6 +425,7 @@ class AiProviderService {
 
     const categories = {
       'Inbox',
+      'Clientes',
       'Trabajo',
       'Personal',
       'Compras',
@@ -434,9 +435,12 @@ class AiProviderService {
       'Recordatorios',
       'Fotos',
     };
-    final requestedCategory = (data['category'] ?? 'Inbox').toString();
-    final category =
-        categories.contains(requestedCategory) ? requestedCategory : 'Inbox';
+    final requestedCategory = (data['category'] ?? note.category).toString();
+    final category = note.messageType == 'contact'
+        ? 'Clientes'
+        : categories.contains(requestedCategory)
+            ? requestedCategory
+            : note.category;
     final rawTags = data['tags'];
     final tags = rawTags is List
         ? rawTags
