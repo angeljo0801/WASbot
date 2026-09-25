@@ -77,9 +77,9 @@ class _RemittanceDraftReviewPageState
   }
 
   int _noteId() {
-    final key = widget.draft.noteKey.trim();
-    if (!key.startsWith('remote:')) return 0;
-    return int.tryParse(key.substring('remote:'.length)) ?? 0;
+    final raw = widget.draft.noteKey.trim().split(':').last;
+    final value = int.tryParse(raw) ?? 0;
+    return value > 0 ? value : 0;
   }
 
   Future<void> _confirm() async {
@@ -96,21 +96,20 @@ class _RemittanceDraftReviewPageState
         ocrText: draft.ocrText,
       );
       if (!ok) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'No se pudo confirmar la remesa en el servidor. El borrador sigue pendiente.',
-              ),
-            ),
-          );
-        }
-        return;
+        throw Exception(
+          'No se pudo confirmar la remesa en el servidor. El borrador sigue pendiente.',
+        );
       }
 
       await store.saveDraft(draft);
       await store.clearOcrEntityLinks(draft.noteKey);
       if (mounted) Navigator.pop(context, true);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString())),
+        );
+      }
     } finally {
       if (mounted) setState(() => saving = false);
     }
