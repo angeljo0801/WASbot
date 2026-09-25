@@ -296,17 +296,30 @@ def ingest_bofa_sms(text: str, received_at: str, sms_id: str = "") -> dict[str, 
 
 
 def parse_paypal_email(subject: str, body: str = "") -> tuple[str, int, str] | None:
-    combined = "\n".join(x for x in [subject or "", body or ""] if x).strip()
-    match = re.search(
-        r"(?:^|\n|\b)(.+?)\s+sent\s+you\s+\$([\d,]+(?:\.\d{1,2})?)\s+USD\b",
-        combined,
-        flags=re.IGNORECASE,
-    )
+    candidates = [subject or ""]
+    candidates.extend((body or "").replace("\r", "\n").split("\n"))
+    match = None
+    for candidate in candidates:
+        clean = " ".join(candidate.split()).strip()
+        if not clean:
+            continue
+        match = re.search(
+            r"^(.+?)\s+sent\s+you\s+\$([\d,]+(?:\.\d{1,2})?)\s+USD\b",
+            clean,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            break
     if not match:
         return None
+
     name = " ".join(match.group(1).split()).strip(" .,-")
-    # Trim common notification/email prefixes without touching the sender's name.
-    name = re.sub(r"^(?:paypal\s*[-:|]\s*)", "", name, flags=re.IGNORECASE).strip()
+    name = re.sub(
+        r"^(?:paypal\s*[-:|]\s*)",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    ).strip()
     try:
         cents = int(
             (Decimal(match.group(2).replace(",", "")) * 100).quantize(Decimal("1"))
@@ -316,6 +329,7 @@ def parse_paypal_email(subject: str, body: str = "") -> tuple[str, int, str] | N
     if not name or cents <= 0:
         return None
 
+    combined = "\n".join(x for x in [subject or "", body or ""] if x)
     date_match = re.search(
         r"Transaction\s+date\s*[:\-]?\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
         combined,
@@ -323,7 +337,6 @@ def parse_paypal_email(subject: str, body: str = "") -> tuple[str, int, str] | N
     )
     transaction_date = date_match.group(1).strip() if date_match else ""
     return name, cents, transaction_date
-
 
 def _paypal_received_at(transaction_date: str, fallback: str) -> tuple[str, str]:
     if transaction_date:
