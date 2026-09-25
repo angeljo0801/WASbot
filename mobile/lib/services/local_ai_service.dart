@@ -273,7 +273,7 @@ class LocalAiService {
     }
     const categories = {
       'Inbox', 'Clientes', 'Trabajo', 'Personal', 'Compras', 'Gastos',
-      'Ideas', 'Documentos', 'Recordatorios', 'Fotos', 'Remesas'
+      'Ideas', 'Documentos', 'Recordatorios', 'Fotos'
     };
     final rawCategory = (data['category'] ?? note.category).toString();
     final category = note.messageType == 'contact'
