@@ -997,13 +997,13 @@ class _DraftReviewPageState extends State<DraftReviewPage> {
                   subtitle: Text('x${items[i]['qty'] ?? 1}'),
                   trailing: itemSelectionMode
                       ? Text(
-                          '\${((items[i]['price'] as num?)?.toDouble() ?? 0).toStringAsFixed(2)}',
+                          '\$${((items[i]['price'] as num?)?.toDouble() ?? 0).toStringAsFixed(2)}',
                         )
                       : Wrap(
                           crossAxisAlignment: WrapCrossAlignment.center,
                           children: [
                             Text(
-                              '\${((items[i]['price'] as num?)?.toDouble() ?? 0).toStringAsFixed(2)}',
+                              '\$${((items[i]['price'] as num?)?.toDouble() ?? 0).toStringAsFixed(2)}',
                             ),
                             IconButton(
                               tooltip: 'Editar artículo',
