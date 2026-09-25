@@ -840,7 +840,7 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
                         title: const Text('Correos de PayPal'),
                         subtitle: Text(
                           paypalNotificationAccess
-                              ? 'Activo. WhatsBot detecta en las notificaciones de Gmail los pagos de PayPal con el formato “nombre sent you $monto USD”.'
+                              ? 'Activo. WhatsBot detecta en las notificaciones de Gmail los pagos de PayPal con el formato “nombre sent you \$monto USD”.'
                               : 'Activa el acceso a notificaciones para registrar automáticamente los pagos de PayPal que lleguen por Gmail.',
                         ),
                         trailing: paypalNotificationAccess
