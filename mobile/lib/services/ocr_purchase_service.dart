@@ -744,7 +744,10 @@ class OcrPurchaseService {
           continue;
         }
 
-        if (correction.batch && selected.isNotEmpty) {
+        if (correction.batch) {
+          if (correction.count != null) {
+            continue;
+          }
           break;
         }
         if (!correction.batch) {
@@ -775,11 +778,11 @@ class OcrPurchaseService {
     for (final note in fallback) {
       if (recent.length >= maxCount) break;
       if (previous != null &&
-          previous.difference(note.createdAt).abs() >
+          previous.difference(note.createdAt) >
               const Duration(minutes: 3)) {
         break;
       }
-      if (messageNote.createdAt.difference(note.createdAt).abs() >
+      if (messageNote.createdAt.difference(note.createdAt) >
           const Duration(minutes: 15)) {
         break;
       }
