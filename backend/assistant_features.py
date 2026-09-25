@@ -248,19 +248,68 @@ def sync_snapshot_clients(payload: dict[str, Any]) -> int:
             if not name and not phone:
                 continue
             try:
-                conn.execute(
-                    """
-                    INSERT INTO client_sync(
-                        external_id, name, phone, source, created_at, updated_at
-                    ) VALUES (?, ?, ?, 'paqueteria_snapshot', ?, ?)
-                    ON CONFLICT(external_id) DO UPDATE SET
-                        name=excluded.name,
-                        phone=CASE WHEN excluded.phone != '' THEN excluded.phone ELSE client_sync.phone END,
-                        source='paqueteria_snapshot',
-                        updated_at=excluded.updated_at
-                    """,
-                    (external_id, name, phone, now, now),
-                )
+                by_id = conn.execute(
+                    "SELECT * FROM client_sync WHERE external_id = ?",
+                    (external_id,),
+                ).fetchone()
+                by_phone = None
+                if phone:
+                    by_phone = conn.execute(
+                        "SELECT * FROM client_sync WHERE phone = ? ORDER BY id LIMIT 1",
+                        (phone,),
+                    ).fetchone()
+
+                if by_id is not None:
+                    conn.execute(
+                        """
+                        UPDATE client_sync
+                        SET name = ?,
+                            phone = CASE WHEN ? != '' THEN ? ELSE phone END,
+                            source = 'paqueteria_snapshot',
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (name or by_id["name"], phone, phone, now, by_id["id"]),
+                    )
+                elif by_phone is not None:
+                    old_external = by_phone["external_id"]
+                    conn.execute(
+                        """
+                        UPDATE client_sync
+                        SET external_id = ?, name = ?, phone = ?,
+                            source = 'paqueteria_snapshot', updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            external_id,
+                            name or by_phone["name"],
+                            phone or by_phone["phone"],
+                            now,
+                            by_phone["id"],
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE client_aliases
+                        SET client_external_id = ?, client_name = ?, updated_at = ?
+                        WHERE client_external_id = ?
+                        """,
+                        (
+                            external_id,
+                            name or by_phone["name"],
+                            now,
+                            old_external,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO client_sync(
+                            external_id, name, phone, source, created_at, updated_at
+                        ) VALUES (?, ?, ?, 'paqueteria_snapshot', ?, ?)
+                        """,
+                        (external_id, name, phone, now, now),
+                    )
             except sqlite3.OperationalError:
                 continue
 
