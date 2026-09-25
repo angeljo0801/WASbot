@@ -102,6 +102,8 @@ class RemittanceOcrParser {
     if (upper.contains('PAYPAL DEBIT')) score += 1;
     if (upper.contains('MONEY RECEIVED')) score += 3;
     if (upper.contains('PAYMENT RECEIVED')) score += 3;
+    if (upper.contains('YOU GOT MONEY')) score += 3;
+    if (upper.contains("YOU'VE GOT MONEY")) score += 3;
     if (RegExp(r'(?:YOU\s+RECEIVED|RECEIVED)\s+\$[0-9]', caseSensitive: false)
         .hasMatch(upper)) {
       score += 3;
@@ -211,12 +213,21 @@ class RemittanceOcrParser {
       if (_plausibleName(value)) return value;
     }
 
-    final receivedFrom = RegExp(
-      r'(?:RECEIVED\s+(?:FROM\s+)?|MONEY\s+RECEIVED\s+FROM\s+)([^\n]{2,80})',
+    final youReceivedFrom = RegExp(
+      r'(?:YOU\s+)?RECEIVED\s+\$\s*[0-9][^\n]*?\s+FROM\s+([^\n]{2,80})',
       caseSensitive: false,
     ).firstMatch(joined);
-    if (receivedFrom != null) {
-      final value = _cleanName(receivedFrom.group(1) ?? '');
+    if (youReceivedFrom != null) {
+      final value = _cleanName(youReceivedFrom.group(1) ?? '');
+      if (_plausibleName(value)) return value;
+    }
+
+    final paymentReceivedFrom = RegExp(
+      r'(?:PAYMENT|MONEY)?\s*RECEIVED\s+FROM\s+([^\n]{2,80})',
+      caseSensitive: false,
+    ).firstMatch(joined);
+    if (paymentReceivedFrom != null) {
+      final value = _cleanName(paymentReceivedFrom.group(1) ?? '');
       if (_plausibleName(value)) return value;
     }
 
@@ -342,7 +353,7 @@ class RemittanceOcrParser {
 
   static String _cleanName(String raw) => raw
       .replaceAll(RegExp(r'^[^A-Za-zÀ-ÿ]+'), '')
-      .replaceAll(RegExp(r"[^A-Za-zÀ-ÿ .\\-']+$"), '')
+      .replaceAll(RegExp(r"[^A-Za-zÀ-ÿ .\'-]+$"), '')
       .replaceAll(RegExp(r'\s+'), ' ')
       .trim();
 
