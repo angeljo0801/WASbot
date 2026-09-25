@@ -249,7 +249,7 @@ def ingest_bofa_sms(text: str, received_at: str, sms_id: str = "") -> dict[str, 
             (
                 f"{name} · {amount_text}",
                 content,
-                text,
+                content,
                 json.dumps(["remesa"]),
                 received_at,
             ),
