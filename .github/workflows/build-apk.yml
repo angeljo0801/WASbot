@@ -68,6 +68,7 @@ jobs:
           cp ../.github/WhatsBotSmsBridge.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotSmsBridge.kt
           cp ../.github/WhatsBotPayPalNotificationListener.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotPayPalNotificationListener.kt
           cp ../.github/WhatsBotPayPalEmailBridge.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotPayPalEmailBridge.kt
+          cp ../.github/WhatsBotPhotoStorageBridge.kt android/app/src/main/kotlin/com/whatsbot/whatsbot/WhatsBotPhotoStorageBridge.kt
 
           normalize_secret() {
             local name="$1"
