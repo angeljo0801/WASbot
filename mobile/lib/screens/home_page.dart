@@ -14,6 +14,7 @@ import '../services/embedding_service.dart';
 import '../services/knowledge_pipeline.dart';
 import '../services/knowledge_store.dart';
 import '../services/note_share_service.dart';
+import '../services/ocr_purchase_service.dart';
 import '../services/remittance_sms_service.dart';
 import '../services/paypal_email_notification_service.dart';
 import 'ai_activity_page.dart';
