@@ -50,14 +50,14 @@ class _ConversationsPageState extends State<ConversationsPage> {
       body: RefreshIndicator(
         onRefresh: _load,
         child: loading
-            ? const ListView(
+            ? ListView(
                 children: [
                   SizedBox(height: 180),
                   Center(child: CircularProgressIndicator()),
                 ],
               )
             : conversations.isEmpty
-                ? const ListView(
+                ? ListView(
                     children: [
                       SizedBox(height: 180),
                       Center(child: Text('Todavía no hay conversaciones.')),
@@ -200,7 +200,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
       body: RefreshIndicator(
         onRefresh: _load,
         child: loading
-            ? const ListView(
+            ? ListView(
                 children: [
                   SizedBox(height: 180),
                   Center(child: CircularProgressIndicator()),

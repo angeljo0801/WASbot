@@ -270,27 +270,22 @@ def _duplicate_by_fingerprint(
     conn: sqlite3.Connection,
     fingerprint: str,
     *,
+    current_source: str,
     exclude_source_key: str = "",
 ) -> sqlite3.Row | None:
     if not fingerprint:
         return None
-    if exclude_source_key:
-        return conn.execute(
-            """
-            SELECT * FROM remittances
-            WHERE dedupe_fingerprint = ? AND source_key != ?
-            ORDER BY id ASC LIMIT 1
-            """,
-            (fingerprint, exclude_source_key),
-        ).fetchone()
-    return conn.execute(
-        """
+    params: list[Any] = [fingerprint, current_source]
+    sql = """
         SELECT * FROM remittances
         WHERE dedupe_fingerprint = ?
-        ORDER BY id ASC LIMIT 1
-        """,
-        (fingerprint,),
-    ).fetchone()
+          AND source != ?
+    """
+    if exclude_source_key:
+        sql += " AND source_key != ?"
+        params.append(exclude_source_key)
+    sql += " ORDER BY id ASC LIMIT 1"
+    return conn.execute(sql, params).fetchone()
 
 
 def ingest_bofa_sms(text: str, received_at: str, sms_id: str = "") -> dict[str, Any] | None:
@@ -325,6 +320,7 @@ def ingest_bofa_sms(text: str, received_at: str, sms_id: str = "") -> dict[str, 
         duplicate = _duplicate_by_fingerprint(
             conn,
             fingerprint,
+            current_source="bofa_sms",
             exclude_source_key=stable_key,
         )
         if duplicate is not None:
@@ -492,6 +488,7 @@ def ingest_paypal_email(
         duplicate = _duplicate_by_fingerprint(
             conn,
             fingerprint,
+            current_source="paypal_email",
             exclude_source_key=stable_key,
         )
         if duplicate is not None:
@@ -644,6 +641,7 @@ def upsert_ocr_remittance(
         duplicate = _duplicate_by_fingerprint(
             conn,
             fingerprint,
+            current_source=f"ocr_{source_clean}",
             exclude_source_key=source_key,
         )
         if existing is None and duplicate is not None:

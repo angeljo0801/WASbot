@@ -68,14 +68,14 @@ class _AiActivityPageState extends State<AiActivityPage> {
       body: RefreshIndicator(
         onRefresh: _load,
         child: loading
-            ? const ListView(
+            ? ListView(
                 children: [
                   SizedBox(height: 180),
                   Center(child: CircularProgressIndicator()),
                 ],
               )
             : rows.isEmpty
-                ? const ListView(
+                ? ListView(
                     children: [
                       SizedBox(height: 180),
                       Center(child: Text('Aún no hay actividad registrada.')),
