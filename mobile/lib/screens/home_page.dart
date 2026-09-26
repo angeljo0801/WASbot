@@ -65,6 +65,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? error;
   final Set<int> selectedNoteIds = <int>{};
   bool shareWorking = false;
+  bool deleteSelectionWorking = false;
   Timer? _backgroundTimer;
   Timer? _replyTimer;
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
@@ -470,14 +471,31 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _imagePathFor(note) != null ||
       note.category == 'Fotos';
 
-  Future<Uint8List?> _remoteThumbnail(String path) =>
-      _thumbnailCache.putIfAbsent(path, () => api.fetchMediaBytes(path));
+  Future<Uint8List?> _remoteThumbnail(String path) async {
+    final existing = _thumbnailCache[path];
+    if (existing != null) {
+      final bytes = await existing;
+      if (bytes != null && bytes.isNotEmpty) return bytes;
+      _thumbnailCache.remove(path);
+    }
+
+    final future = api.fetchMediaBytes(path);
+    _thumbnailCache[path] = future;
+    final bytes = await future;
+    if (bytes == null || bytes.isEmpty) {
+      _thumbnailCache.remove(path);
+    }
+    return bytes;
+  }
 
   Widget _imageFallback(Note note) => CircleAvatar(
         child: Icon(typeIcon(note)),
       );
 
-  Widget _noteThumbnail(Note note) {
+  Widget _noteThumbnail(
+    Note note, {
+    bool interactive = true,
+  }) {
     final path = _imagePathFor(note);
     if (path == null || !_isImageNote(note)) {
       return CircleAvatar(child: Icon(typeIcon(note)));
@@ -485,21 +503,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     final file = File(path);
     if (file.existsSync()) {
-      return GestureDetector(
-        onTap: () => _openImagePath(path),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(12),
-          child: SizedBox(
-            width: 62,
-            height: 62,
-            child: Image.file(
-              file,
-              fit: BoxFit.cover,
-              cacheWidth: 220,
-              errorBuilder: (_, __, ___) => _imageFallback(note),
-            ),
+      final image = ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: SizedBox(
+          width: 62,
+          height: 62,
+          child: Image.file(
+            file,
+            fit: BoxFit.cover,
+            cacheWidth: 220,
+            errorBuilder: (_, __, ___) => _imageFallback(note),
           ),
         ),
+      );
+      if (!interactive) return image;
+      return GestureDetector(
+        onTap: () => _openImagePath(path),
+        child: image,
       );
     }
 
@@ -530,22 +550,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           return _imageFallback(note);
         }
 
-        return GestureDetector(
-          onTap: () => _openImageBytes(bytes),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(12),
-            child: SizedBox(
-              width: 62,
-              height: 62,
-              child: Image.memory(
-                bytes,
-                fit: BoxFit.cover,
-                cacheWidth: 220,
-                gaplessPlayback: true,
-                errorBuilder: (_, __, ___) => _imageFallback(note),
-              ),
+        final image = ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: SizedBox(
+            width: 62,
+            height: 62,
+            child: Image.memory(
+              bytes,
+              fit: BoxFit.cover,
+              cacheWidth: 220,
+              gaplessPlayback: true,
+              errorBuilder: (_, __, ___) => _imageFallback(note),
             ),
           ),
+        );
+        if (!interactive) return image;
+        return GestureDetector(
+          onTap: () => _openImageBytes(bytes),
+          child: image,
         );
       },
     );
@@ -615,6 +637,79 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } finally {
       if (mounted) setState(() => shareWorking = false);
     }
+  }
+
+  Future<void> _deleteSelectedNotes() async {
+    if (deleteSelectionWorking || selectedNoteIds.isEmpty) return;
+
+    final selected = notes
+        .where((note) => selectedNoteIds.contains(note.id))
+        .toList();
+    if (selected.isEmpty) {
+      _clearSelection();
+      return;
+    }
+
+    final count = selected.length;
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text(
+              count == 1 ? 'Borrar nota' : 'Borrar $count notas',
+            ),
+            content: Text(
+              count == 1
+                  ? '¿Quieres borrar la nota seleccionada?'
+                  : '¿Quieres borrar las $count notas seleccionadas?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancelar'),
+              ),
+              FilledButton.tonalIcon(
+                onPressed: () => Navigator.pop(context, true),
+                icon: const Icon(Icons.delete_outline),
+                label: Text(count == 1 ? 'Borrar' : 'Borrar todas'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed || !mounted) return;
+
+    setState(() => deleteSelectionWorking = true);
+    var deleted = 0;
+    final failed = <Note>[];
+
+    for (final note in selected) {
+      try {
+        await api.deleteNote(note.id);
+        final imagePath = _imagePathFor(note);
+        if (imagePath != null) _thumbnailCache.remove(imagePath);
+        deleted++;
+      } catch (_) {
+        failed.add(note);
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      selectedNoteIds
+        ..clear()
+        ..addAll(failed.map((note) => note.id));
+      deleteSelectionWorking = false;
+    });
+
+    await refresh(runLocalAi: false);
+    if (!mounted) return;
+
+    final message = failed.isEmpty
+        ? (deleted == 1 ? 'Nota borrada.' : '$deleted notas borradas.')
+        : '$deleted borradas; ${failed.length} no se pudieron borrar.';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   }
 
   Future<void> add() async {
@@ -691,8 +786,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         actions: selectionMode
             ? [
                 IconButton(
+                  tooltip: 'Borrar seleccionados',
+                  onPressed: deleteSelectionWorking || shareWorking
+                      ? null
+                      : _deleteSelectedNotes,
+                  icon: deleteSelectionWorking
+                      ? const SizedBox.square(
+                          dimension: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.delete_outline),
+                ),
+                IconButton(
                   tooltip: 'Compartir seleccionados',
-                  onPressed: shareWorking ? null : _shareSelected,
+                  onPressed: deleteSelectionWorking || shareWorking
+                      ? null
+                      : _shareSelected,
                   icon: shareWorking
                       ? const SizedBox.square(
                           dimension: 20,
@@ -960,10 +1069,37 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 child: ListTile(
                   contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   selected: selectedNoteIds.contains(n.id),
-                  leading: selectionMode &&
-                          selectedNoteIds.contains(n.id)
-                      ? const CircleAvatar(child: Icon(Icons.check))
-                      : _noteThumbnail(n),
+                  leading: SizedBox(
+                    width: 62,
+                    height: 62,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      clipBehavior: Clip.none,
+                      children: [
+                        _noteThumbnail(
+                          n,
+                          interactive: !selectionMode,
+                        ),
+                        if (selectedNoteIds.contains(n.id))
+                          Positioned(
+                            right: -3,
+                            bottom: -3,
+                            child: CircleAvatar(
+                              radius: 12,
+                              backgroundColor:
+                                  Theme.of(context).colorScheme.primary,
+                              child: Icon(
+                                Icons.check,
+                                size: 16,
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onPrimary,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
                   title: Text(n.title, maxLines: 2, overflow: TextOverflow.ellipsis),
                   subtitle: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -990,7 +1126,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   trailing: selectionMode
                       ? Checkbox(
                           value: selectedNoteIds.contains(n.id),
-                          onChanged: (_) => _toggleSelection(n),
+                          onChanged: deleteSelectionWorking
+                              ? null
+                              : (_) => _toggleSelection(n),
                         )
                       : PopupMenuButton<String>(
                           onSelected: (v) {
