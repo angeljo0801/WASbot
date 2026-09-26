@@ -294,7 +294,7 @@ jobs:
       - name: Build stable release APK
         working-directory: mobile
         run: |
-          flutter build apk --release --target-platform android-arm64 --build-name 0.16.1 --build-number "$GITHUB_RUN_NUMBER"
+          flutter build apk --release --target-platform android-arm64 --build-name 0.16.2 --build-number "$GITHUB_RUN_NUMBER"
 
       - name: Verify APK signature
         working-directory: mobile
@@ -305,7 +305,7 @@ jobs:
           "$APKSIGNER" verify --verbose build/app/outputs/flutter-apk/app-release.apk
           {
             echo "applicationId=com.whatsbot.whatsbot"
-            echo "versionName=0.16.1"
+            echo "versionName=0.16.2"
             echo "buildNumber=$GITHUB_RUN_NUMBER"
             echo "signing=persistent"
             echo "backups=Downloads/WhatsBot"
@@ -314,7 +314,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: WhatsBot-v0.16.1-Separate-Confirm-Share-APK
+          name: WhatsBot-v0.16.2-Image-Thumbnails-Bulk-Delete-APK
           path: |
             mobile/build/app/outputs/flutter-apk/app-release.apk
             mobile/build/app/outputs/flutter-apk/BUILD_IDENTITY.txt
