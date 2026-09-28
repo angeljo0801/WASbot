@@ -330,6 +330,63 @@ class KnowledgeStore {
     }
   }
 
+  Future<void> deleteNoteArtifacts(String noteKey) async {
+    final cleanKey = noteKey.trim();
+    if (cleanKey.isEmpty) return;
+    final db = await database;
+
+    final rows = await db.query(
+      'entity_notes',
+      columns: ['entity_id'],
+      where: 'note_key = ?',
+      whereArgs: [cleanKey],
+    );
+    final entityIds = rows
+        .map((row) => row['entity_id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet();
+
+    await db.transaction((txn) async {
+      await txn.delete(
+        'entity_notes',
+        where: 'note_key = ?',
+        whereArgs: [cleanKey],
+      );
+      await txn.delete(
+        'purchase_drafts',
+        where: 'note_key = ?',
+        whereArgs: [cleanKey],
+      );
+      await txn.delete(
+        'embeddings',
+        where: 'note_key = ?',
+        whereArgs: [cleanKey],
+      );
+      await txn.delete(
+        'note_state',
+        where: 'note_key = ?',
+        whereArgs: [cleanKey],
+      );
+
+      for (final entityId in entityIds) {
+        final remaining = Sqflite.firstIntValue(
+              await txn.rawQuery(
+                'SELECT COUNT(*) FROM entity_notes WHERE entity_id = ?',
+                [entityId],
+              ),
+            ) ??
+            0;
+        if (remaining == 0) {
+          await txn.delete(
+            'entities',
+            where: 'id = ?',
+            whereArgs: [entityId],
+          );
+        }
+      }
+    });
+  }
+
   Future<void> syncOcrKeyEntities(PurchaseDraft draft) async {
     await clearOcrEntityLinks(draft.noteKey);
     if (draft.draftType == 'remittance') {
