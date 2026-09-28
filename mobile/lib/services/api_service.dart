@@ -335,6 +335,69 @@ class ApiService {
     }
   }
 
+  Future<List<Map<String, dynamic>>> getSyncedPurchases() async {
+    final url = await baseUrl;
+    if (url.isEmpty) return const <Map<String, dynamic>>[];
+    try {
+      final r = await http
+          .get(
+            Uri.parse('$url/api/purchases'),
+            headers: await _headers(),
+          )
+          .timeout(const Duration(seconds: 15));
+      if (r.statusCode != 200) return const <Map<String, dynamic>>[];
+      final decoded = jsonDecode(r.body);
+      if (decoded is! List) return const <Map<String, dynamic>>[];
+      return decoded
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+    } catch (_) {
+      return const <Map<String, dynamic>>[];
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> getSyncedPackages() async {
+    final url = await baseUrl;
+    if (url.isEmpty) return const <Map<String, dynamic>>[];
+    try {
+      final r = await http
+          .get(
+            Uri.parse('$url/api/packages'),
+            headers: await _headers(),
+          )
+          .timeout(const Duration(seconds: 15));
+      if (r.statusCode != 200) return const <Map<String, dynamic>>[];
+      final decoded = jsonDecode(r.body);
+      if (decoded is! List) return const <Map<String, dynamic>>[];
+      return decoded
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+    } catch (_) {
+      return const <Map<String, dynamic>>[];
+    }
+  }
+
+  Future<Map<String, dynamic>?> upsertSyncedPackage(
+    Map<String, dynamic> package,
+  ) async {
+    final url = await baseUrl;
+    if (url.isEmpty) throw Exception('Servidor no configurado');
+    final r = await http
+        .post(
+          Uri.parse('$url/api/packages'),
+          headers: await _headers(),
+          body: jsonEncode(package),
+        )
+        .timeout(const Duration(seconds: 45));
+    if (r.statusCode != 200 && r.statusCode != 201) {
+      throw Exception('No se pudo sincronizar el paquete (${r.statusCode})');
+    }
+    final decoded = jsonDecode(r.body);
+    return decoded is Map ? Map<String, dynamic>.from(decoded) : null;
+  }
+
   Future<List<Note>> _loadLocalNotes() async {
     final p = await SharedPreferences.getInstance();
     final raw = p.getString(_localNotesKey);
