@@ -312,6 +312,15 @@ class _PackageSyncEditPageState extends State<PackageSyncEditPage> {
   String _purchaseId(Map<String, dynamic> row) =>
       (row['external_id'] ?? row['id'] ?? '').toString();
 
+  String _localPaqueteriaClientId() {
+    const prefix = 'paqueteria-client-';
+    if (clientExternalId.startsWith(prefix)) {
+      return clientExternalId.substring(prefix.length);
+    }
+    final client = _client();
+    return (client?['id'] ?? '').toString();
+  }
+
   Map<String, dynamic>? _client() {
     for (final client in widget.clients) {
       if (_clientId(client) == clientExternalId) return client;
@@ -536,10 +545,11 @@ class _PackageSyncEditPageState extends State<PackageSyncEditPage> {
             recipientId,
             widget.recipients
                 .where((recipient) {
-                  final id = (recipient['clientId'] ?? '').toString();
-                  return clientExternalId.isEmpty ||
-                      id.isEmpty ||
-                      id == clientExternalId;
+                  final ownerId = (recipient['clientId'] ?? '').toString();
+                  final localClientId = _localPaqueteriaClientId();
+                  return localClientId.isEmpty ||
+                      ownerId.isEmpty ||
+                      ownerId == localClientId;
                 })
                 .map((recipient) => DropdownMenuItem(
                       value: (recipient['id'] ?? '').toString(),
