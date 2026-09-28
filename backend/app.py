@@ -123,6 +123,29 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS package_sync (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                external_id TEXT NOT NULL UNIQUE,
+                tracking TEXT NOT NULL DEFAULT '',
+                carrier TEXT NOT NULL DEFAULT 'Auto / Otro',
+                client_external_id TEXT NOT NULL DEFAULT '',
+                client_name TEXT NOT NULL DEFAULT '',
+                client_phone TEXT NOT NULL DEFAULT '',
+                purchase_external_id TEXT NOT NULL DEFAULT '',
+                recipient_id TEXT NOT NULL DEFAULT '',
+                recipient_name TEXT NOT NULL DEFAULT '',
+                weight_us REAL NOT NULL DEFAULT 0,
+                weight_cu REAL NOT NULL DEFAULT 0,
+                bill_weight REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'Tracking creado',
+                notes TEXT NOT NULL DEFAULT '',
+                photo_files TEXT NOT NULL DEFAULT '[]',
+                received_at TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'paqueteria',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS pending_contact_requests (
                 sender TEXT PRIMARY KEY,
                 contacts_json TEXT NOT NULL,
@@ -766,6 +789,27 @@ class PurchaseSyncCreate(BaseModel):
     created_at: str = ""
 
 
+class PackageSyncCreate(BaseModel):
+    external_id: str
+    tracking: str
+    carrier: str = "Auto / Otro"
+    client_external_id: str = ""
+    client_name: str = ""
+    client_phone: str = ""
+    purchase_external_id: str = ""
+    recipient_id: str = ""
+    recipient_name: str = ""
+    weight_us: float = 0
+    weight_cu: float = 0
+    bill_weight: float = 0
+    status: str = "Tracking creado"
+    notes: str = ""
+    photos: list[PurchasePhoto] = Field(default_factory=list)
+    received_at: str = ""
+    source: str = "whatsbot"
+    created_at: str = ""
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {
@@ -1277,6 +1321,188 @@ def get_purchase_photo(purchase_id: int, photo_index: int) -> FileResponse:
         raise HTTPException(status_code=404, detail="Photo not found")
     name = Path(str(files[photo_index])).name
     path = DATA_DIR / "purchase_media" / name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Photo not found")
+    return FileResponse(path)
+
+
+def package_row(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        files = json.loads(row["photo_files"] or "[]")
+    except Exception:
+        files = []
+    return {
+        "id": row["id"],
+        "external_id": row["external_id"],
+        "tracking": row["tracking"],
+        "carrier": row["carrier"],
+        "client_external_id": row["client_external_id"],
+        "client_name": row["client_name"],
+        "client_phone": row["client_phone"],
+        "purchase_external_id": row["purchase_external_id"],
+        "recipient_id": row["recipient_id"],
+        "recipient_name": row["recipient_name"],
+        "weight_us": float(row["weight_us"] or 0),
+        "weight_cu": float(row["weight_cu"] or 0),
+        "bill_weight": float(row["bill_weight"] or 0),
+        "status": row["status"],
+        "notes": row["notes"],
+        "photo_urls": [
+            f"/api/packages/{row['id']}/photos/{i}" for i in range(len(files))
+        ],
+        "received_at": row["received_at"],
+        "source": row["source"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+@app.post("/api/packages", status_code=201, dependencies=[Depends(require_api_key)])
+def create_or_update_package(payload: PackageSyncCreate) -> dict[str, Any]:
+    external_id = payload.external_id.strip()
+    tracking = payload.tracking.strip()
+    if not external_id:
+        raise HTTPException(status_code=400, detail="external_id is required")
+    if not tracking:
+        raise HTTPException(status_code=400, detail="tracking is required")
+
+    media_dir = DATA_DIR / "package_media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    now = utc_now()
+
+    with closing(db()) as conn:
+        existing = conn.execute(
+            "SELECT * FROM package_sync WHERE external_id = ?",
+            (external_id,),
+        ).fetchone()
+        if existing is None:
+            existing = conn.execute(
+                "SELECT * FROM package_sync WHERE UPPER(REPLACE(tracking, ' ', '')) = UPPER(REPLACE(?, ' ', ''))",
+                (tracking,),
+            ).fetchone()
+
+        previous_files: list[str] = []
+        if existing:
+            try:
+                previous_files = json.loads(existing["photo_files"] or "[]")
+            except Exception:
+                previous_files = []
+
+        new_files: list[str] = []
+        for i, photo in enumerate(payload.photos):
+            try:
+                raw = base64.b64decode(photo.data, validate=True)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid package photo {i}",
+                ) from exc
+            if len(raw) > 8 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="Package photo too large")
+            suffix = Path(photo.name).suffix.lower()
+            if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+                suffix = ".jpg"
+            safe_external = re.sub(r"[^A-Za-z0-9_-]", "_", external_id)[:80]
+            filename = f"{safe_external}_{i}{suffix}"
+            (media_dir / filename).write_bytes(raw)
+            new_files.append(filename)
+
+        if not new_files:
+            new_files = previous_files
+
+        created_at = payload.created_at.strip() or (
+            existing["created_at"] if existing else now
+        )
+        values = (
+            external_id,
+            tracking,
+            payload.carrier.strip() or "Auto / Otro",
+            payload.client_external_id.strip(),
+            payload.client_name.strip(),
+            normalize_phone(payload.client_phone),
+            payload.purchase_external_id.strip(),
+            payload.recipient_id.strip(),
+            payload.recipient_name.strip(),
+            float(payload.weight_us or 0),
+            float(payload.weight_cu or 0),
+            float(payload.bill_weight or 0),
+            payload.status.strip() or "Tracking creado",
+            payload.notes.strip(),
+            json.dumps(new_files),
+            payload.received_at.strip(),
+            payload.source.strip() or "whatsbot",
+            created_at,
+            now,
+        )
+
+        if existing:
+            conn.execute(
+                """
+                UPDATE package_sync
+                SET external_id=?, tracking=?, carrier=?, client_external_id=?,
+                    client_name=?, client_phone=?, purchase_external_id=?,
+                    recipient_id=?, recipient_name=?, weight_us=?, weight_cu=?,
+                    bill_weight=?, status=?, notes=?, photo_files=?,
+                    received_at=?, source=?, created_at=?, updated_at=?
+                WHERE id=?
+                """,
+                (*values, existing["id"]),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO package_sync(
+                    external_id, tracking, carrier, client_external_id,
+                    client_name, client_phone, purchase_external_id,
+                    recipient_id, recipient_name, weight_us, weight_cu,
+                    bill_weight, status, notes, photo_files, received_at,
+                    source, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM package_sync WHERE external_id = ?",
+            (external_id,),
+        ).fetchone()
+        if row is None:
+            row = conn.execute(
+                "SELECT * FROM package_sync WHERE UPPER(REPLACE(tracking, ' ', '')) = UPPER(REPLACE(?, ' ', ''))",
+                (tracking,),
+            ).fetchone()
+        return package_row(row)
+
+
+@app.get("/api/packages", dependencies=[Depends(require_api_key)])
+def list_synced_packages() -> list[dict[str, Any]]:
+    with closing(db()) as conn:
+        rows = conn.execute(
+            "SELECT * FROM package_sync ORDER BY datetime(updated_at) DESC, id DESC"
+        ).fetchall()
+        return [package_row(row) for row in rows]
+
+
+@app.get(
+    "/api/packages/{package_id}/photos/{photo_index}",
+    dependencies=[Depends(require_api_key)],
+)
+def get_package_photo(package_id: int, photo_index: int) -> FileResponse:
+    with closing(db()) as conn:
+        row = conn.execute(
+            "SELECT photo_files FROM package_sync WHERE id = ?",
+            (package_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Package not found")
+    try:
+        files = json.loads(row["photo_files"] or "[]")
+    except Exception:
+        files = []
+    if photo_index < 0 or photo_index >= len(files):
+        raise HTTPException(status_code=404, detail="Photo not found")
+    name = Path(str(files[photo_index])).name
+    path = DATA_DIR / "package_media" / name
     if not path.exists():
         raise HTTPException(status_code=404, detail="Photo not found")
     return FileResponse(path)
