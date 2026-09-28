@@ -28,6 +28,7 @@ import 'entities_page.dart';
 import 'knowledge_chat_page.dart';
 import 'new_note_page.dart';
 import 'note_detail_page.dart';
+import 'packages_sync_page.dart';
 import 'settings_page.dart';
 
 class HomePage extends StatefulWidget {
@@ -45,8 +46,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   late final KnowledgePipeline knowledge;
   final search = TextEditingController();
   final categories = const [
-    'Todas', 'Inbox', 'Clientes', 'Trabajo', 'Personal', 'Compras', 'Gastos',
-    'Ideas', 'Documentos', 'Recordatorios', 'Fotos', 'Remesas'
+    'Todas', 'Inbox', 'Clientes', 'Trabajo', 'Personal', 'Compras', 'Paquetes',
+    'Gastos', 'Ideas', 'Documentos', 'Recordatorios', 'Fotos', 'Remesas'
   ];
 
   String category = 'Todas';
@@ -685,6 +686,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     for (final note in selected) {
       try {
         await api.deleteNote(note.id);
+        await KnowledgeStore.instance.deleteNoteArtifacts(
+          KnowledgeStore.noteKey(note),
+        );
         final imagePath = _imagePathFor(note);
         if (imagePath != null) _thumbnailCache.remove(imagePath);
         deleted++;
@@ -736,6 +740,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!ok) return;
     try {
       await api.deleteNote(n.id);
+      await KnowledgeStore.instance.deleteNoteArtifacts(
+        KnowledgeStore.noteKey(n),
+      );
       await refresh();
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
@@ -1044,7 +1051,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         child: ChoiceChip(
                           label: Text(c),
                           selected: category == c,
-                          onSelected: (_) {
+                          onSelected: (_) async {
+                            if (c == 'Paquetes') {
+                              await Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => PackagesSyncPage(api: api),
+                                ),
+                              );
+                              if (mounted) refresh();
+                              return;
+                            }
                             setState(() => category = c);
                             refresh();
                           },
