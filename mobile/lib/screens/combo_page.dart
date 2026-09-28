@@ -13,8 +13,13 @@ class ComboPage extends StatefulWidget {
 class _ComboPageState extends State<ComboPage> {
   final search = TextEditingController();
   Map<String, dynamic>? snapshot;
+  List<Map<String, dynamic>> syncedClients = <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> syncedPurchases = <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> syncedPackages = <Map<String, dynamic>>[];
   bool loading = true;
+  bool syncing = false;
   String? error;
+  DateTime? lastManualSync;
 
   @override
   void initState() {
@@ -41,7 +46,7 @@ class _ComboPageState extends State<ComboPage> {
   }
 
   String clientName(String? id) {
-    final clients = rows('clients');
+    final clients = syncedClients.isNotEmpty ? syncedClients : rows('clients');
     for (final c in clients) {
       if ((c['id'] ?? '').toString() == (id ?? '')) {
         return (c['name'] ?? 'Sin cliente').toString();
@@ -62,8 +67,22 @@ class _ComboPageState extends State<ComboPage> {
       error = null;
     });
     try {
-      snapshot = await widget.api.paqueteriaSnapshot();
-      if (snapshot == null) error = 'Paquetería todavía no ha enviado un snapshot.';
+      final values = await Future.wait<dynamic>([
+        widget.api.paqueteriaSnapshot(),
+        widget.api.getClients(),
+        widget.api.getSyncedPurchases(),
+        widget.api.getSyncedPackages(),
+      ]);
+      snapshot = values[0] as Map<String, dynamic>?;
+      syncedClients = values[1] as List<Map<String, dynamic>>;
+      syncedPurchases = values[2] as List<Map<String, dynamic>>;
+      syncedPackages = values[3] as List<Map<String, dynamic>>;
+      if (snapshot == null &&
+          syncedClients.isEmpty &&
+          syncedPurchases.isEmpty &&
+          syncedPackages.isEmpty) {
+        error = 'Paquetería todavía no ha enviado datos al servidor.';
+      }
     } catch (e) {
       error = e.toString();
     } finally {
@@ -71,11 +90,59 @@ class _ComboPageState extends State<ComboPage> {
     }
   }
 
+  Future<void> syncNow() async {
+    if (syncing) return;
+    setState(() {
+      syncing = true;
+      error = null;
+    });
+    try {
+      final values = await Future.wait<dynamic>([
+        widget.api.paqueteriaSnapshot(),
+        widget.api.getClients(),
+        widget.api.getSyncedPurchases(),
+        widget.api.getSyncedPackages(),
+      ]);
+      snapshot = values[0] as Map<String, dynamic>?;
+      syncedClients = values[1] as List<Map<String, dynamic>>;
+      syncedPurchases = values[2] as List<Map<String, dynamic>>;
+      syncedPackages = values[3] as List<Map<String, dynamic>>;
+      lastManualSync = DateTime.now();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Sincronizado: ${syncedClients.length} clientes · '
+            '${syncedPurchases.length} compras · '
+            '${syncedPackages.length} paquetes',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => error = e.toString());
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo sincronizar: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => syncing = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final clients = rows('clients').where(matches).toList();
-    final purchases = rows('purchases').where(matches).toList();
-    final packages = rows('packages').where(matches).toList();
+    final clients = (syncedClients.isNotEmpty ? syncedClients : rows('clients'))
+        .where(matches)
+        .toList();
+    final purchases =
+        (syncedPurchases.isNotEmpty ? syncedPurchases : rows('purchases'))
+            .where(matches)
+            .toList();
+    final packages =
+        (syncedPackages.isNotEmpty ? syncedPackages : rows('packages'))
+            .where(matches)
+            .toList();
     final payments = rows('payments').where(matches).toList();
     final updated = (snapshot?['updated_at'] ?? '').toString();
 
@@ -102,8 +169,39 @@ class _ComboPageState extends State<ComboPage> {
                     ),
                     if (updated.isNotEmpty) ...[
                       const SizedBox(height: 6),
-                      Text('Actualizado: ' + updated),
+                      Text('Último envío de Paquetería: ' + updated),
                     ],
+                    if (lastManualSync != null) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        'Última sincronización manual: '
+                        '${lastManualSync!.hour.toString().padLeft(2, '0')}:'
+                        '${lastManualSync!.minute.toString().padLeft(2, '0')}',
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        onPressed: syncing ? null : syncNow,
+                        icon: syncing
+                            ? const SizedBox.square(
+                                dimension: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.sync),
+                        label: Text(
+                          syncing
+                              ? 'Sincronizando…'
+                              : 'Sincronizar con Paquetería',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Actualiza Clientes, Compras y Paquetes con la última información enviada por Paquetería.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
                   ],
                 ),
               ),
@@ -164,11 +262,15 @@ class _ComboPageState extends State<ComboPage> {
                 leading: const Icon(Icons.shopping_bag_outlined),
                 title: Text('Compras (' + purchases.length.toString() + ')'),
                 children: purchases.take(100).map((p) {
-                  final name = clientName((p['clientId'] ?? '').toString());
+                  final canonicalName =
+                      (p['customer_name'] ?? '').toString().trim();
+                  final name = canonicalName.isNotEmpty
+                      ? canonicalName
+                      : clientName((p['clientId'] ?? '').toString());
                   final total = p['clientTotal'] ?? p['total'] ?? 0;
-                  final status = (p['status'] ?? '').toString();
+                  final status = (p['status'] ?? 'Sin estado').toString();
                   return ListTile(
-                    title: Text((p['store'] ?? 'Compra').toString()),
+                    title: Text((p['store'] ?? p['title'] ?? 'Compra').toString()),
                     subtitle: Text(name + ' · USD ' + total.toString() + ' · ' + status),
                   );
                 }).toList(),
@@ -177,7 +279,11 @@ class _ComboPageState extends State<ComboPage> {
                 leading: const Icon(Icons.inventory_2_outlined),
                 title: Text('Paquetes (' + packages.length.toString() + ')'),
                 children: packages.take(100).map((p) {
-                  final name = clientName((p['clientId'] ?? '').toString());
+                  final canonicalName =
+                      (p['client_name'] ?? '').toString().trim();
+                  final name = canonicalName.isNotEmpty
+                      ? canonicalName
+                      : clientName((p['clientId'] ?? '').toString());
                   return ListTile(
                     title: Text((p['tracking'] ?? 'Sin tracking').toString()),
                     subtitle: Text(
