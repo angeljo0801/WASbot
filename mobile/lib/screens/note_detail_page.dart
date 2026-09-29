@@ -37,6 +37,7 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
     'Trabajo',
     'Personal',
     'Compras',
+    'Paquetes',
     'Gastos',
     'Ideas',
     'Documentos',
@@ -65,6 +66,25 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
     for (final path in value.photoPaths) {
       final file = File(path);
       if (await file.exists()) return file.path;
+
+      final rawPhoto = path.trim();
+      if (rawPhoto.isEmpty) continue;
+      final bytes = await widget.api.fetchMediaBytes(rawPhoto);
+      if (bytes == null || bytes.isEmpty) continue;
+      final docs = await getApplicationDocumentsDirectory();
+      final folder = Directory('${docs.path}/combined_media');
+      if (!await folder.exists()) await folder.create(recursive: true);
+      final safe = KnowledgeStore.noteKey(value)
+          .replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+      var ext = '.jpg';
+      final lower = rawPhoto.toLowerCase();
+      if (lower.contains('.png')) ext = '.png';
+      if (lower.contains('.webp')) ext = '.webp';
+      final cached = File(
+        '${folder.path}/combined_${safe}_${DateTime.now().microsecondsSinceEpoch}$ext',
+      );
+      await cached.writeAsBytes(bytes, flush: true);
+      return cached.path;
     }
     final raw = (value.mediaPath ?? '').trim();
     if (raw.isEmpty) return null;
@@ -508,14 +528,23 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
   @override
   Widget build(BuildContext context) {
     final localPhotos = <String>[];
+    final remotePhotos = <String>[];
     for (final path in note.photoPaths) {
-      if (File(path).existsSync()) localPhotos.add(path);
+      final clean = path.trim();
+      if (clean.isEmpty) continue;
+      if (File(clean).existsSync()) {
+        if (!localPhotos.contains(clean)) localPhotos.add(clean);
+      } else if (!remotePhotos.contains(clean)) {
+        remotePhotos.add(clean);
+      }
     }
-    if (localPhotos.isEmpty &&
-        note.mediaPath != null &&
-        File(note.mediaPath!).existsSync() &&
-        note.messageType == 'image') {
-      localPhotos.add(note.mediaPath!);
+    final media = note.mediaPath?.trim() ?? '';
+    if (media.isNotEmpty) {
+      if (File(media).existsSync()) {
+        if (!localPhotos.contains(media)) localPhotos.add(media);
+      } else if (!remotePhotos.contains(media)) {
+        remotePhotos.add(media);
+      }
     }
 
     return Scaffold(
@@ -571,8 +600,13 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
                   onPressed: working ? null : classify,
                 ),
                 Chip(
-                  label:
-                      Text(note.source == 'whatsapp' ? 'WhatsApp' : 'Manual'),
+                  label: Text(
+                    note.source == 'whatsapp'
+                        ? 'WhatsApp'
+                        : note.source == 'paqueteria'
+                            ? 'Paquetería'
+                            : 'Manual',
+                  ),
                 ),
                 Chip(label: Text(aiLabel)),
                 ...note.tags.map((t) => Chip(label: Text('#$t'))),
@@ -683,7 +717,7 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
                 ),
               ),
             ],
-            if (note.isPurchase &&
+            if ((note.isPurchase || note.category == 'Paquetes') &&
                 (note.customerName.isNotEmpty ||
                     note.customerPhone.isNotEmpty)) ...[
               const SizedBox(height: 14),
@@ -751,65 +785,70 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
                   ),
                 ),
               ),
-            ] else if (note.messageType == 'image' &&
-                note.mediaPath?.isNotEmpty == true) ...[
+            ],
+            if (remotePhotos.isNotEmpty) ...[
               const SizedBox(height: 18),
-              FutureBuilder(
-                future: widget.api.fetchMediaBytes(note.mediaPath!),
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState == ConnectionState.waiting) {
-                    return const SizedBox(
-                      height: 200,
-                      child: Center(child: CircularProgressIndicator()),
-                    );
-                  }
-                  final bytes = snapshot.data;
-                  if (bytes == null || bytes.isEmpty) {
-                    return const Text('No se pudo cargar la imagen.');
-                  }
-                  return InkWell(
-                    borderRadius: BorderRadius.circular(16),
-                    onTap: () => _openMemoryPhoto(bytes),
-                    child: Stack(
-                      alignment: Alignment.bottomCenter,
-                      children: [
-                        ClipRRect(
+              SizedBox(
+                height: 280,
+                child: PageView.builder(
+                  itemCount: remotePhotos.length,
+                  itemBuilder: (_, index) {
+                    final path = remotePhotos[index];
+                    return FutureBuilder<Uint8List?>(
+                      future: widget.api.fetchMediaBytes(path),
+                      builder: (context, snapshot) {
+                        if (snapshot.connectionState ==
+                            ConnectionState.waiting) {
+                          return const Center(
+                            child: CircularProgressIndicator(),
+                          );
+                        }
+                        final bytes = snapshot.data;
+                        if (bytes == null || bytes.isEmpty) {
+                          return const Center(
+                            child: Text('No se pudo cargar esta foto.'),
+                          );
+                        }
+                        return InkWell(
                           borderRadius: BorderRadius.circular(16),
-                          child: Image.memory(
-                            bytes,
-                            fit: BoxFit.contain,
-                          ),
-                        ),
-                        Container(
-                          margin: const EdgeInsets.only(bottom: 10),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 7,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.68),
-                            borderRadius: BorderRadius.circular(18),
-                          ),
-                          child: const Row(
-                            mainAxisSize: MainAxisSize.min,
+                          onTap: () => _openMemoryPhoto(bytes),
+                          child: Stack(
+                            alignment: Alignment.bottomCenter,
                             children: [
-                              Icon(
-                                Icons.zoom_in_outlined,
-                                color: Colors.white,
-                                size: 18,
+                              Positioned.fill(
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(16),
+                                  child: Image.memory(
+                                    bytes,
+                                    fit: BoxFit.contain,
+                                  ),
+                                ),
                               ),
-                              SizedBox(width: 6),
-                              Text(
-                                'Toca para ampliar',
-                                style: TextStyle(color: Colors.white),
+                              Container(
+                                margin: const EdgeInsets.only(bottom: 10),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 7,
+                                ),
+                                decoration: BoxDecoration(
+                                  color:
+                                      Colors.black.withValues(alpha: 0.68),
+                                  borderRadius: BorderRadius.circular(18),
+                                ),
+                                child: Text(
+                                  remotePhotos.length > 1
+                                      ? 'Foto ${index + 1} de ${remotePhotos.length} · toca para ampliar'
+                                      : 'Toca para ampliar',
+                                  style: const TextStyle(color: Colors.white),
+                                ),
                               ),
                             ],
                           ),
-                        ),
-                      ],
-                    ),
-                  );
-                },
+                        );
+                      },
+                    );
+                  },
+                ),
               ),
             ],
             if (note.messageType == 'document' ||
