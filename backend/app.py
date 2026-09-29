@@ -101,6 +101,11 @@ def init_db() -> None:
                 reply_attempts INTEGER NOT NULL DEFAULT 0,
                 reply_updated_at TEXT,
                 replied_at TEXT,
+                customer_name TEXT NOT NULL DEFAULT '',
+                customer_phone TEXT NOT NULL DEFAULT '',
+                photo_paths TEXT NOT NULL DEFAULT '[]',
+                linked_entity_type TEXT NOT NULL DEFAULT '',
+                linked_external_id TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
 
@@ -174,6 +179,11 @@ def init_db() -> None:
             "reply_attempts": "INTEGER NOT NULL DEFAULT 0",
             "reply_updated_at": "TEXT",
             "replied_at": "TEXT",
+            "customer_name": "TEXT NOT NULL DEFAULT ''",
+            "customer_phone": "TEXT NOT NULL DEFAULT ''",
+            "photo_paths": "TEXT NOT NULL DEFAULT '[]'",
+            "linked_entity_type": "TEXT NOT NULL DEFAULT ''",
+            "linked_external_id": "TEXT NOT NULL DEFAULT ''",
         }
         for column, definition in note_migrations.items():
             if column not in note_columns:
@@ -258,6 +268,12 @@ def get_config(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
 
 
 def note_row(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        photo_paths = json.loads(row["photo_paths"] or "[]")
+        if not isinstance(photo_paths, list):
+            photo_paths = []
+    except Exception:
+        photo_paths = []
     return {
         "id": row["id"],
         "title": row["title"],
@@ -279,8 +295,251 @@ def note_row(row: sqlite3.Row) -> dict[str, Any]:
         "reply_attempts": int(row["reply_attempts"] or 0),
         "reply_updated_at": row["reply_updated_at"],
         "replied_at": row["replied_at"],
+        "customer_name": row["customer_name"] or "",
+        "customer_phone": row["customer_phone"] or "",
+        "photo_paths": [str(x) for x in photo_paths if str(x).strip()],
+        "linked_entity_type": row["linked_entity_type"] or "",
+        "linked_external_id": row["linked_external_id"] or "",
         "created_at": row["created_at"],
     }
+
+
+def _json_string_list(value: Any) -> list[str]:
+    try:
+        raw = json.loads(value or "[]") if isinstance(value, str) else value
+    except Exception:
+        raw = []
+    if not isinstance(raw, list):
+        return []
+    result: list[str] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _upsert_paqueteria_note(
+    *,
+    entity_type: str,
+    external_id: str,
+    title: str,
+    content: str,
+    category: str,
+    tags: list[str],
+    created_at: str = "",
+    customer_name: str = "",
+    customer_phone: str = "",
+    photo_paths: list[str] | None = None,
+) -> int | None:
+    external_id = str(external_id or "").strip()
+    if not external_id:
+        return None
+    photos = []
+    for path in photo_paths or []:
+        value = str(path or "").strip()
+        if value and value not in photos:
+            photos.append(value)
+    message_sid = f"paqueteria-sync:{entity_type}:{external_id}"
+    now = utc_now()
+    created = str(created_at or "").strip() or now
+    media_path = photos[0] if photos else None
+    message_type = f"sync_{entity_type}"
+    safe_title = str(title or "").strip() or "Dato sincronizado"
+    safe_content = str(content or "").strip()
+
+    with closing(db()) as conn:
+        existing = conn.execute(
+            "SELECT id, created_at FROM notes WHERE message_sid = ?",
+            (message_sid,),
+        ).fetchone()
+        if existing is None:
+            cur = conn.execute(
+                """
+                INSERT INTO notes(
+                    title, content, original_text, category, tags, source,
+                    message_type, status, ai_source, media_path, sender,
+                    message_sid, customer_name, customer_phone, photo_paths,
+                    linked_entity_type, linked_external_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'paqueteria', ?, 'ready', 'rules', ?,
+                          '', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    safe_title,
+                    safe_content,
+                    safe_content,
+                    category,
+                    json.dumps(tags, ensure_ascii=False),
+                    message_type,
+                    media_path,
+                    message_sid,
+                    customer_name.strip(),
+                    normalize_phone(customer_phone),
+                    json.dumps(photos, ensure_ascii=False),
+                    entity_type,
+                    external_id,
+                    created,
+                ),
+            )
+            note_id = int(cur.lastrowid)
+        else:
+            note_id = int(existing["id"])
+            conn.execute(
+                """
+                UPDATE notes
+                SET title=?, content=?, original_text=?, category=?, tags=?,
+                    source='paqueteria', message_type=?, status='ready',
+                    ai_source='rules', media_path=?, customer_name=?,
+                    customer_phone=?, photo_paths=?, linked_entity_type=?,
+                    linked_external_id=?
+                WHERE id=?
+                """,
+                (
+                    safe_title,
+                    safe_content,
+                    safe_content,
+                    category,
+                    json.dumps(tags, ensure_ascii=False),
+                    message_type,
+                    media_path,
+                    customer_name.strip(),
+                    normalize_phone(customer_phone),
+                    json.dumps(photos, ensure_ascii=False),
+                    entity_type,
+                    external_id,
+                    note_id,
+                ),
+            )
+        conn.commit()
+        return note_id
+
+
+def sync_paqueteria_entities_to_notes() -> int:
+    synced = 0
+    with closing(db()) as conn:
+        clients = conn.execute(
+            """
+            SELECT external_id, name, phone, created_at
+            FROM client_sync
+            WHERE external_id LIKE 'paqueteria-client-%'
+            """
+        ).fetchall()
+        purchases = conn.execute(
+            """
+            SELECT id, external_id, customer_name, customer_phone, title,
+                   description, store, total, order_number, photo_files, created_at
+            FROM purchase_sync
+            WHERE external_id LIKE 'paqueteria-purchase-%'
+            """
+        ).fetchall()
+        packages = conn.execute(
+            """
+            SELECT id, external_id, tracking, carrier, client_name, client_phone,
+                   purchase_external_id, recipient_name, weight_us, weight_cu,
+                   bill_weight, status, notes, photo_files, received_at,
+                   created_at, source
+            FROM package_sync
+            WHERE source = 'paqueteria'
+               OR external_id LIKE 'paqueteria-package-%'
+            """
+        ).fetchall()
+
+    for row in clients:
+        name = str(row["name"] or "").strip() or "Sin nombre"
+        phone = str(row["phone"] or "").strip()
+        lines = [f"Nombre: {name}"]
+        if phone:
+            lines.append(f"Teléfono: {phone}")
+        if _upsert_paqueteria_note(
+            entity_type="client",
+            external_id=row["external_id"],
+            title=f"Cliente: {name}",
+            content="\n".join(lines),
+            category="Clientes",
+            tags=["sincronizado", "paqueteria", "cliente"],
+            created_at=row["created_at"],
+            customer_name=name,
+            customer_phone=phone,
+        ) is not None:
+            synced += 1
+
+    for row in purchases:
+        customer = str(row["customer_name"] or "").strip()
+        store = str(row["store"] or row["title"] or "Compra").strip() or "Compra"
+        order_number = str(row["order_number"] or "").strip()
+        description = str(row["description"] or "").strip()
+        total = float(row["total"] or 0)
+        files = _json_string_list(row["photo_files"])
+        photo_urls = [
+            f"/api/purchases/{row['id']}/photos/{i}" for i in range(len(files))
+        ]
+        lines = [
+            f"Cliente: {customer or 'Sin cliente'}",
+            f"Tienda: {store}",
+            f"Total: USD {total:.2f}",
+        ]
+        if order_number:
+            lines.append(f"Pedido: {order_number}")
+        if description:
+            lines.append(f"Descripción: {description}")
+        if _upsert_paqueteria_note(
+            entity_type="purchase",
+            external_id=row["external_id"],
+            title=f"Compra · {customer or store}",
+            content="\n".join(lines),
+            category="Compras",
+            tags=["sincronizado", "paqueteria", "compra"],
+            created_at=row["created_at"],
+            customer_name=customer,
+            customer_phone=str(row["customer_phone"] or ""),
+            photo_paths=photo_urls,
+        ) is not None:
+            synced += 1
+
+    for row in packages:
+        tracking = str(row["tracking"] or "").strip() or "Sin tracking"
+        client_name = str(row["client_name"] or "").strip()
+        recipient = str(row["recipient_name"] or "").strip()
+        package_notes = str(row["notes"] or "").strip()
+        files = _json_string_list(row["photo_files"])
+        photo_urls = [
+            f"/api/packages/{row['id']}/photos/{i}" for i in range(len(files))
+        ]
+        lines = [
+            f"Cliente: {client_name or 'Sin cliente'}",
+            f"Tracking: {tracking}",
+            f"Transportista: {row['carrier'] or 'Auto / Otro'}",
+            f"Estado: {row['status'] or 'Sin estado'}",
+        ]
+        if recipient:
+            lines.append(f"Destinatario: {recipient}")
+        if row["purchase_external_id"]:
+            lines.append(f"Compra asociada: {row['purchase_external_id']}")
+        if float(row["weight_us"] or 0) > 0:
+            lines.append(f"Peso EE.UU.: {float(row['weight_us']):.2f} lb")
+        if float(row["weight_cu"] or 0) > 0:
+            lines.append(f"Peso Cuba: {float(row['weight_cu']):.2f} lb")
+        if float(row["bill_weight"] or 0) > 0:
+            lines.append(f"Peso a cobrar: {float(row['bill_weight']):.2f} lb")
+        if row["received_at"]:
+            lines.append(f"Recibido: {row['received_at']}")
+        if package_notes:
+            lines.append(f"Notas: {package_notes}")
+        if _upsert_paqueteria_note(
+            entity_type="package",
+            external_id=row["external_id"],
+            title=f"Paquete {tracking} · {client_name or 'Sin cliente'}",
+            content="\n".join(lines),
+            category="Paquetes",
+            tags=["sincronizado", "paqueteria", "paquete"],
+            created_at=row["created_at"],
+            customer_name=client_name,
+            customer_phone=str(row["client_phone"] or ""),
+            photo_paths=photo_urls,
+        ) is not None:
+            synced += 1
+
+    return synced
 
 
 def twilio_client() -> Client:
@@ -970,6 +1229,10 @@ def api_ocr_corrections(source: str) -> list[dict[str, Any]]:
 
 @app.get("/api/notes", dependencies=[Depends(require_api_key)])
 def list_notes(q: str = "", category: str = "") -> list[dict[str, Any]]:
+    try:
+        sync_paqueteria_entities_to_notes()
+    except Exception as exc:
+        print(f"PAQUETERIA_NOTE_SYNC_ERROR {exc}")
     sql = "SELECT * FROM notes WHERE 1=1"
     params: list[Any] = []
     if q.strip():
@@ -1053,6 +1316,27 @@ def patch_note(note_id: int, payload: NotePatch) -> dict[str, Any]:
 @app.delete("/api/notes/{note_id}", status_code=204, dependencies=[Depends(require_api_key)])
 def delete_note(note_id: int) -> Response:
     with closing(db()) as conn:
+        linked = conn.execute(
+            """
+            SELECT linked_entity_type, linked_external_id
+            FROM notes
+            WHERE id = ?
+            """,
+            (note_id,),
+        ).fetchone()
+        if linked is not None:
+            entity_type = str(linked["linked_entity_type"] or "").strip()
+            external_id = str(linked["linked_external_id"] or "").strip()
+            table = {
+                "client": "client_sync",
+                "purchase": "purchase_sync",
+                "package": "package_sync",
+            }.get(entity_type)
+            if table and external_id:
+                conn.execute(
+                    f"DELETE FROM {table} WHERE external_id = ?",
+                    (external_id,),
+                )
         conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
         conn.commit()
     return Response(status_code=204)
