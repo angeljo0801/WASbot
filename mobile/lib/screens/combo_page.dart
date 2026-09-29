@@ -45,8 +45,87 @@ class _ComboPageState extends State<ComboPage> {
         .toList();
   }
 
+  String _phoneKey(dynamic value) =>
+      value.toString().replaceAll(RegExp(r'[^0-9]'), '');
+
+  String _clientKey(Map<String, dynamic> row) {
+    final external = (row['external_id'] ?? row['whatsbotClientSyncId'] ?? '')
+        .toString()
+        .trim();
+    if (external.isNotEmpty) return 'external:$external';
+    final id = (row['id'] ?? '').toString().trim();
+    if (id.isNotEmpty) return 'id:$id';
+    final phone = _phoneKey(row['phone'] ?? '');
+    if (phone.isNotEmpty) return 'phone:$phone';
+    final name = (row['name'] ?? '').toString().trim().toLowerCase();
+    return 'name:$name';
+  }
+
+  String _purchaseKey(Map<String, dynamic> row) {
+    final external = (row['external_id'] ?? row['whatsbotSyncId'] ?? '')
+        .toString()
+        .trim();
+    if (external.isNotEmpty) return 'external:$external';
+    final id = (row['id'] ?? '').toString().trim();
+    return id.isEmpty ? row.toString() : 'local:paqueteria-purchase-$id';
+  }
+
+  String _packageKey(Map<String, dynamic> row) {
+    final external = (row['external_id'] ?? row['whatsbotPackageSyncId'] ?? '')
+        .toString()
+        .trim();
+    if (external.isNotEmpty) return 'external:$external';
+    final tracking = (row['tracking'] ?? '')
+        .toString()
+        .replaceAll(RegExp(r'\s+'), '')
+        .toUpperCase();
+    if (tracking.isNotEmpty) return 'tracking:$tracking';
+    final id = (row['id'] ?? '').toString().trim();
+    return id.isEmpty ? row.toString() : 'local:paqueteria-package-$id';
+  }
+
+  List<Map<String, dynamic>> _mergeRows(
+    List<Map<String, dynamic>> snapshotRows,
+    List<Map<String, dynamic>> canonicalRows,
+    String Function(Map<String, dynamic>) keyOf,
+  ) {
+    final out = <Map<String, dynamic>>[];
+    final indexByKey = <String, int>{};
+
+    void addOrMerge(Map<String, dynamic> row) {
+      final key = keyOf(row);
+      final existingIndex = indexByKey[key];
+      if (existingIndex == null) {
+        indexByKey[key] = out.length;
+        out.add(Map<String, dynamic>.from(row));
+        return;
+      }
+      out[existingIndex] = {
+        ...out[existingIndex],
+        ...row,
+      };
+    }
+
+    for (final row in snapshotRows) {
+      addOrMerge(row);
+    }
+    for (final row in canonicalRows) {
+      addOrMerge(row);
+    }
+    return out;
+  }
+
+  List<Map<String, dynamic>> mergedClients() =>
+      _mergeRows(rows('clients'), syncedClients, _clientKey);
+
+  List<Map<String, dynamic>> mergedPurchases() =>
+      _mergeRows(rows('purchases'), syncedPurchases, _purchaseKey);
+
+  List<Map<String, dynamic>> mergedPackages() =>
+      _mergeRows(rows('packages'), syncedPackages, _packageKey);
+
   String clientName(String? id) {
-    final clients = syncedClients.isNotEmpty ? syncedClients : rows('clients');
+    final clients = mergedClients();
     for (final c in clients) {
       if ((c['id'] ?? '').toString() == (id ?? '')) {
         return (c['name'] ?? 'Sin cliente').toString();
@@ -113,9 +192,9 @@ class _ComboPageState extends State<ComboPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'Sincronizado: ${syncedClients.length} clientes · '
-            '${syncedPurchases.length} compras · '
-            '${syncedPackages.length} paquetes',
+            'Sincronizado: ${mergedClients().length} clientes · '
+            '${mergedPurchases().length} compras · '
+            '${mergedPackages().length} paquetes',
           ),
         ),
       );
@@ -132,17 +211,9 @@ class _ComboPageState extends State<ComboPage> {
 
   @override
   Widget build(BuildContext context) {
-    final clients = (syncedClients.isNotEmpty ? syncedClients : rows('clients'))
-        .where(matches)
-        .toList();
-    final purchases =
-        (syncedPurchases.isNotEmpty ? syncedPurchases : rows('purchases'))
-            .where(matches)
-            .toList();
-    final packages =
-        (syncedPackages.isNotEmpty ? syncedPackages : rows('packages'))
-            .where(matches)
-            .toList();
+    final clients = mergedClients().where(matches).toList();
+    final purchases = mergedPurchases().where(matches).toList();
+    final packages = mergedPackages().where(matches).toList();
     final payments = rows('payments').where(matches).toList();
     final updated = (snapshot?['updated_at'] ?? '').toString();
 
@@ -167,6 +238,13 @@ class _ComboPageState extends State<ComboPage> {
                     const Text(
                       'Vista sincronizada para consultar clientes, compras, paquetes y pagos desde WhatsBot.',
                     ),
+                    if ((snapshot?['updated_at'] ?? '').toString().isEmpty) ...[
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Paquetería todavía no ha subido su base completa al servidor. '
+                        'Abre Paquetería y usa “Subir todo y sincronizar ahora”.',
+                      ),
+                    ],
                     if (updated.isNotEmpty) ...[
                       const SizedBox(height: 6),
                       Text('Último envío de Paquetería: ' + updated),
