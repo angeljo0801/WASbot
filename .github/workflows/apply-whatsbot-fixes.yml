@@ -1,0 +1,212 @@
+name: Apply WhatsBot 0.17.3 fixes
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-whatsbot-fixes.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new, label):
+              p = Path(path)
+              s = p.read_text()
+              if old not in s:
+                  raise SystemExit(f'Missing anchor for {label} in {path}')
+              p.write_text(s.replace(old, new, 1))
+
+          # 1) Paqueteria clients must appear in Clientes even when their canonical
+          # external id was preserved from an earlier WhatsApp contact match.
+          replace(
+              'backend/app.py',
+              """            WHERE external_id LIKE 'paqueteria-client-%'\n""",
+              """            WHERE source = 'paqueteria'\n               OR external_id LIKE 'paqueteria-client-%'\n""",
+              'paqueteria client note query',
+          )
+
+          # 2) Only auto-organize genuinely pending Inbox notes. Explicit force
+          # remains available for a user-requested reprocess.
+          replace(
+              'mobile/lib/screens/home_page.dart',
+              """    final candidates = notes\n        .where(\n          (n) =>\n              n.source == 'whatsapp' &&\n              (force || n.aiProvider != sourceId),\n        )\n        .take(20)\n        .toList();\n""",
+              """    final candidates = notes\n        .where((n) {\n          if (n.source != 'whatsapp') return false;\n          if (force) return true;\n          return n.category == 'Inbox' && n.aiProvider != sourceId;\n        })\n        .take(20)\n        .toList();\n""",
+              'Inbox-only AI processing',
+          )
+
+          # 3) Knowledge/OCR processing should run only for notes that have never
+          # completed their local processing pass, instead of every app launch.
+          replace(
+              'mobile/lib/screens/home_page.dart',
+              """  Future<void> _processKnowledge() async {\n    if (knowledgeRunning) return;\n    if (mounted) {\n      setState(() {\n        knowledgeRunning = true;\n        knowledgeDone = 0;\n        knowledgeTotal = notes.length;\n        knowledgeLabel = '';\n      });\n    }\n    try {\n      await knowledge.processNotes(\n        notes,\n""",
+              """  Future<void> _processKnowledge() async {\n    if (knowledgeRunning) return;\n    final pendingNotes = await knowledge.pendingNotes(notes);\n    if (pendingNotes.isEmpty) return;\n    if (mounted) {\n      setState(() {\n        knowledgeRunning = true;\n        knowledgeDone = 0;\n        knowledgeTotal = pendingNotes.length;\n        knowledgeLabel = '';\n      });\n    }\n    try {\n      await knowledge.processNotes(\n        pendingNotes,\n""",
+              'knowledge pending filter',
+          )
+
+          kp = Path('mobile/lib/services/knowledge_pipeline.dart')
+          ks = kp.read_text()
+          anchor = """  Future<void> processNotes(\n    List<Note> notes, {\n"""
+          if anchor not in ks:
+              raise SystemExit('Missing KnowledgePipeline processNotes anchor')
+          pending_method = """  Future<List<Note>> pendingNotes(\n    List<Note> notes, {\n    int maxNotes = 40,\n  }) async {\n    final pending = <Note>[];\n    for (final note in notes) {\n      final key = KnowledgeStore.noteKey(note);\n      final state = await store.noteState(key);\n      final embedding = await store.embedding(key);\n      final ocrDone = note.messageType != 'image' ||\n          ((state?['ocr_processed'] as num?)?.toInt() == 1);\n\n      // A note is considered fully processed after one successful local pass:\n      // OCR (when applicable) plus an embedding. This prevents reopening the\n      // app from re-analyzing already-organized notes forever.\n      if (state == null || embedding == null || !ocrDone) {\n        pending.add(note);\n        if (pending.length >= maxNotes) break;\n      }\n    }\n    return pending;\n  }\n\n"""
+          kp.write_text(ks.replace(anchor, pending_method + anchor, 1))
+
+          replace(
+              'mobile/lib/services/knowledge_pipeline.dart',
+              """      if (note.messageType == 'remittance') {\n        // Remittance notes are already structured as name, amount and date.\n        // Do not run generic entity extraction over them.\n        done++;\n        onProgress?.call(\n          KnowledgePipelineProgress(done, candidates.length, note.title),\n        );\n        continue;\n      }\n""",
+              """      if (note.messageType == 'remittance') {\n        // Remittance notes are already structured as name, amount and date.\n        // Mark/index them once so they are not reprocessed on every launch.\n        await store.saveNoteState(key, entitiesProcessed: true);\n        try {\n          await embeddings.indexNote(note);\n        } catch (_) {}\n        done++;\n        onProgress?.call(\n          KnowledgePipelineProgress(done, candidates.length, note.title),\n        );\n        continue;\n      }\n""",
+              'remittance processed state',
+          )
+
+          # 4) Replace sharing service with robust text-only + all remote media sharing.
+          Path('mobile/lib/services/note_share_service.dart').write_text(r'''import 'dart:io';
+
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
+
+import '../models/note.dart';
+import 'api_service.dart';
+import 'knowledge_store.dart';
+
+class NoteShareService {
+  final ApiService api;
+
+  const NoteShareService(this.api);
+
+  String _extensionFor(String raw, Note note) {
+    final lower = raw.toLowerCase();
+    for (final candidate in [
+      '.jpg', '.jpeg', '.png', '.webp', '.pdf', '.doc', '.docx',
+      '.xls', '.xlsx', '.txt', '.zip', '.mp3', '.m4a', '.mp4',
+    ]) {
+      if (lower.contains(candidate)) return candidate;
+    }
+    return note.messageType == 'image' || note.category == 'Fotos'
+        ? '.jpg'
+        : '.bin';
+  }
+
+  Future<String?> _materialize(Note note, String rawPath, int index) async {
+    final path = rawPath.trim();
+    if (path.isEmpty) return null;
+
+    final local = File(path);
+    if (await local.exists()) return local.path;
+
+    final bytes = await api.fetchMediaBytes(path);
+    if (bytes == null || bytes.isEmpty) return null;
+
+    final docs = await getApplicationDocumentsDirectory();
+    final folder = Directory('${docs.path}/shared_inbox');
+    if (!await folder.exists()) await folder.create(recursive: true);
+
+    final safe = KnowledgeStore.noteKey(note)
+        .replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+    final ext = _extensionFor(path, note);
+    final file = File('${folder.path}/${safe}_$index$ext');
+    await file.writeAsBytes(bytes, flush: true);
+    return file.path;
+  }
+
+  Future<List<String>> _filesForNote(Note note) async {
+    final out = <String>[];
+    final candidates = <String>[
+      ...note.photoPaths,
+      if ((note.mediaPath ?? '').trim().isNotEmpty) note.mediaPath!.trim(),
+    ];
+
+    var index = 0;
+    for (final raw in candidates) {
+      final path = await _materialize(note, raw, index++);
+      if (path != null && !out.contains(path)) out.add(path);
+    }
+    return out;
+  }
+
+  Future<void> shareNotes(List<Note> notes) async {
+    if (notes.isEmpty) return;
+
+    final files = <String>[];
+    for (final note in notes) {
+      final noteFiles = await _filesForNote(note);
+      for (final path in noteFiles) {
+        if (!files.contains(path)) files.add(path);
+      }
+    }
+
+    final text = notes
+        .map((note) {
+          final body = note.content.trim().isNotEmpty
+              ? note.content.trim()
+              : note.originalText.trim();
+          return body.isEmpty ? note.title : '${note.title}\n$body';
+        })
+        .join('\n\n')
+        .trim();
+
+    final subject = notes.length == 1
+        ? notes.first.title
+        : 'WhatsBot · ${notes.length} elementos';
+
+    final params = ShareParams(
+      text: text.isEmpty ? subject : text,
+      subject: subject,
+      files: files.isEmpty ? null : files.map(XFile.new).toList(),
+    );
+    await SharePlus.instance.share(params);
+  }
+}
+''')
+
+          # Give single-note sharing visible error feedback instead of silently doing nothing.
+          replace(
+              'mobile/lib/screens/note_detail_page.dart',
+              """  Future<void> shareNote() async {\n    setState(() => working = true);\n    try {\n      await NoteShareService(widget.api).shareNotes([note]);\n    } finally {\n      if (mounted) setState(() => working = false);\n    }\n  }\n""",
+              """  Future<void> shareNote() async {\n    setState(() => working = true);\n    try {\n      await NoteShareService(widget.api).shareNotes([note]);\n    } catch (e) {\n      if (mounted) {\n        ScaffoldMessenger.of(context).showSnackBar(\n          SnackBar(content: Text('No se pudo compartir: $e')),\n        );\n      }\n    } finally {\n      if (mounted) setState(() => working = false);\n    }\n  }\n""",
+              'share error feedback',
+          )
+
+          # Version/build labels for the normal Android workflow.
+          replace(
+              '.github/workflows/build-apk.yml',
+              '--build-name 0.17.2',
+              '--build-name 0.17.3',
+              'APK build name',
+          )
+          replace(
+              '.github/workflows/build-apk.yml',
+              'echo "versionName=0.17.2"',
+              'echo "versionName=0.17.3"',
+              'APK identity version',
+          )
+          replace(
+              '.github/workflows/build-apk.yml',
+              'WhatsBot-v0.17.2-Full-Paqueteria-Sync-Fix-APK',
+              'WhatsBot-v0.17.3-Clients-Share-Inbox-Fix-APK',
+              'APK artifact name',
+          )
+          PY
+
+      - name: Remove one-time workflow and commit fixes
+        shell: bash
+        run: |
+          git rm .github/workflows/apply-whatsbot-fixes.yml
+          git config user.name "WhatsBot Fix Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add backend/app.py mobile/lib/screens/home_page.dart mobile/lib/services/knowledge_pipeline.dart mobile/lib/services/note_share_service.dart mobile/lib/screens/note_detail_page.dart .github/workflows/build-apk.yml
+          git commit -m "WhatsBot 0.17.3: synced clients, sharing, persistent inbox processing"
+          git push origin main
