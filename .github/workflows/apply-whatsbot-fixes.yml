@@ -76,18 +76,13 @@ jobs:
               "  Future<void> shareNote() async {\n    setState(() => working = true);\n    try {\n      await NoteShareService(widget.api).shareNotes([note]);\n    } catch (e) {\n      if (mounted) {\n        ScaffoldMessenger.of(context).showSnackBar(\n          SnackBar(content: Text('No se pudo compartir: $e')),\n        );\n      }\n    } finally {\n      if (mounted) setState(() => working = false);\n    }\n  }\n",
               'share error feedback',
           )
-
-          replace('.github/workflows/build-apk.yml', '--build-name 0.17.2', '--build-name 0.17.3', 'APK build name')
-          replace('.github/workflows/build-apk.yml', 'echo "versionName=0.17.2"', 'echo "versionName=0.17.3"', 'APK identity version')
-          replace('.github/workflows/build-apk.yml', 'WhatsBot-v0.17.2-Full-Paqueteria-Sync-Fix-APK', 'WhatsBot-v0.17.3-Clients-Share-Inbox-Fix-APK', 'APK artifact name')
           PY
 
-      - name: Remove one-time workflow and commit fixes
+      - name: Commit fixes
         shell: bash
         run: |
-          git rm .github/workflows/apply-whatsbot-fixes.yml
           git config user.name "WhatsBot Fix Bot"
           git config user.email "actions@users.noreply.github.com"
-          git add backend/app.py mobile/lib/screens/home_page.dart mobile/lib/services/knowledge_pipeline.dart mobile/lib/services/note_share_service.dart mobile/lib/screens/note_detail_page.dart .github/workflows/build-apk.yml
+          git add backend/app.py mobile/lib/screens/home_page.dart mobile/lib/services/knowledge_pipeline.dart mobile/lib/services/note_share_service.dart mobile/lib/screens/note_detail_page.dart
           git commit -m "WhatsBot 0.17.3: synced clients, sharing, persistent inbox processing"
           git push origin main
