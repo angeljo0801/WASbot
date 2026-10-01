@@ -242,17 +242,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _processKnowledge() async {
     if (knowledgeRunning) return;
+    final pendingNotes = await knowledge.pendingNotes(notes);
+    if (pendingNotes.isEmpty) return;
     if (mounted) {
       setState(() {
         knowledgeRunning = true;
         knowledgeDone = 0;
-        knowledgeTotal = notes.length;
+        knowledgeTotal = pendingNotes.length;
         knowledgeLabel = '';
       });
     }
     try {
       await knowledge.processNotes(
-        notes,
+        pendingNotes,
         onProgress: (p) {
           if (!mounted) return;
           setState(() {
@@ -358,11 +360,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     final sourceId = ai.sourceId(settings.provider);
     final candidates = notes
-        .where(
-          (n) =>
-              n.source == 'whatsapp' &&
-              (force || n.aiProvider != sourceId),
-        )
+        .where((n) {
+          if (n.source != 'whatsapp') return false;
+          if (force) return true;
+          return n.category == 'Inbox' && n.aiProvider != sourceId;
+        })
         .take(20)
         .toList();
     if (candidates.isEmpty) return;

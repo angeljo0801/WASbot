@@ -421,7 +421,8 @@ def sync_paqueteria_entities_to_notes() -> int:
             """
             SELECT external_id, name, phone, created_at
             FROM client_sync
-            WHERE external_id LIKE 'paqueteria-client-%'
+            WHERE source = 'paqueteria'
+               OR external_id LIKE 'paqueteria-client-%'
             """
         ).fetchall()
         purchases = conn.execute(

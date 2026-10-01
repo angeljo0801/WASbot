@@ -318,6 +318,12 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
     setState(() => working = true);
     try {
       await NoteShareService(widget.api).shareNotes([note]);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('No se pudo compartir: $e')),
+        );
+      }
     } finally {
       if (mounted) setState(() => working = false);
     }

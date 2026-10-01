@@ -118,6 +118,28 @@ class KnowledgePipeline {
     }
   }
 
+  Future<List<Note>> pendingNotes(
+    List<Note> notes, {
+    int maxNotes = 40,
+  }) async {
+    final pending = <Note>[];
+    for (final note in notes) {
+      final key = KnowledgeStore.noteKey(note);
+      final state = await store.noteState(key);
+      final embedding = await store.embedding(key);
+      final ocrDone = note.messageType != 'image' ||
+          ((state?['ocr_processed'] as num?)?.toInt() == 1);
+
+      // Consider the note complete after one successful local processing pass.
+      // This keeps already-organized notes stable across app launches.
+      if (state == null || embedding == null || !ocrDone) {
+        pending.add(note);
+        if (pending.length >= maxNotes) break;
+      }
+    }
+    return pending;
+  }
+
   Future<void> processNotes(
     List<Note> notes, {
     void Function(KnowledgePipelineProgress progress)? onProgress,
@@ -133,7 +155,11 @@ class KnowledgePipeline {
 
       if (note.messageType == 'remittance') {
         // Remittance notes are already structured as name, amount and date.
-        // Do not run generic entity extraction over them.
+        // Mark/index them once so they are not reprocessed on every launch.
+        await store.saveNoteState(key, entitiesProcessed: true);
+        try {
+          await embeddings.indexNote(note);
+        } catch (_) {}
         done++;
         onProgress?.call(
           KnowledgePipelineProgress(done, candidates.length, note.title),
