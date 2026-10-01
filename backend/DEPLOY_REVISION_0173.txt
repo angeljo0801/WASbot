@@ -1,0 +1,2 @@
+WhatsBot backend revision 0.17.3
+Includes Paqueteria client note synchronization fix.
