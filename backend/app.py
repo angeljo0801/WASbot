@@ -421,7 +421,7 @@ def sync_paqueteria_entities_to_notes() -> int:
             """
             SELECT external_id, name, phone, created_at
             FROM client_sync
-            WHERE source = 'paqueteria'
+            WHERE source LIKE 'paqueteria%'
                OR external_id LIKE 'paqueteria-client-%'
             """
         ).fetchall()
@@ -1230,6 +1230,11 @@ def api_ocr_corrections(source: str) -> list[dict[str, Any]]:
 
 @app.get("/api/notes", dependencies=[Depends(require_api_key)])
 def list_notes(q: str = "", category: str = "") -> list[dict[str, Any]]:
+    # Backfill and refresh Paqueteria entities before applying note filters.
+    try:
+        sync_paqueteria_entities_to_notes()
+    except Exception as exc:
+        print("PAQUETERIA_NOTE_SYNC_ERROR " + str(exc))
     try:
         sync_paqueteria_entities_to_notes()
     except Exception as exc:
