@@ -1,5 +1,5 @@
 name: whatsbot
-version: 0.17.2+38
+version: 0.17.3+39
 publish_to: 'none'
 description: Inbox personal de notas recibidas desde WhatsApp con IA local opcional.
 environment:
