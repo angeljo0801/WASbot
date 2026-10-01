@@ -1,0 +1,66 @@
+name: Fix Paqueteria client notes runtime
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-client-notes-runtime.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch backend client materialization
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('backend/app.py')
+          s = p.read_text()
+
+          old_source = """            WHERE source = 'paqueteria'\n               OR external_id LIKE 'paqueteria-client-%'\n"""
+          new_source = """            WHERE source LIKE 'paqueteria%'\n               OR external_id LIKE 'paqueteria-client-%'\n"""
+          if old_source in s:
+              s = s.replace(old_source, new_source, 1)
+          elif new_source not in s:
+              raise SystemExit('Could not locate client source filter')
+
+          old_list = '''@app.get("/api/notes", dependencies=[Depends(require_api_key)])
+def list_notes(q: str = "", category: str = "") -> list[dict[str, Any]]:
+    try:
+'''
+          new_list = '''@app.get("/api/notes", dependencies=[Depends(require_api_key)])
+def list_notes(q: str = "", category: str = "") -> list[dict[str, Any]]:
+    # Materialize data already synchronized from Paqueteria before filtering.
+    # This also backfills clients received through the business snapshot, whose
+    # source is paqueteria_snapshot rather than the older paqueteria label.
+    try:
+        sync_paqueteria_entities_to_notes()
+    except Exception as exc:
+        print(f"PAQUETERIA_NOTE_SYNC_ERROR {exc}")
+    try:
+'''
+          if old_list in s:
+              s = s.replace(old_list, new_list, 1)
+          elif 'PAQUETERIA_NOTE_SYNC_ERROR' not in s:
+              raise SystemExit('Could not locate list_notes endpoint')
+
+          p.write_text(s)
+          PY
+
+      - name: Commit backend fix
+        shell: bash
+        run: |
+          git config user.name "WhatsBot Fix Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add backend/app.py
+          git commit -m "Fix Paqueteria snapshot clients in Clientes"
+          git push origin main
