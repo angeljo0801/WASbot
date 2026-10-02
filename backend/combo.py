@@ -783,10 +783,17 @@ def process_operator_message(
                 if name and name not in files:
                     files.append(name)
             pending["photo_files"] = files
+            missing = missing_purchase_fields(pending)
+            if not missing:
+                commit_purchase(sender, pending)
+                return (
+                    f"Añadí {len(photo_files)} foto(s). Compra guardada y lista para "
+                    "sincronizar automáticamente con Paquetería."
+                )
             save_pending_purchase(sender, pending)
             return (
                 f"Añadí {len(photo_files)} foto(s). {purchase_summary(pending)} "
-                "Puedes seguir enviando fotos o responder Sí para guardarla."
+                "Me falta: " + " y ".join(missing) + "."
             )
 
         answer = yes_no(body)
@@ -801,14 +808,18 @@ def process_operator_message(
             return "Compra guardada. Se sincronizará automáticamente con Paquetería."
 
         pending = parse_purchase_text(body, pending)
-        save_pending_purchase(sender, pending)
         missing = missing_purchase_fields(pending)
         if missing:
+            save_pending_purchase(sender, pending)
             return (
                 f"Actualicé la compra. {purchase_summary(pending)} "
                 "Me falta: " + " y ".join(missing) + "."
             )
-        return f"Actualicé la compra. {purchase_summary(pending)} ¿La guardo? Responde Sí o No."
+        commit_purchase(sender, pending)
+        return (
+            f"Compra actualizada: {purchase_summary(pending)} "
+            "Se guardó y se sincronizará automáticamente con Paquetería."
+        )
 
     if clean in {"ayuda", "help", "/ayuda", "/help"}:
         return (
@@ -837,17 +848,17 @@ def process_operator_message(
             f"{message_sid or uuid.uuid4().hex[:12]}"
         )
         draft["photo_files"] = [x for x in photo_files if x]
-        save_pending_purchase(sender, draft)
         missing = missing_purchase_fields(draft)
         if missing:
+            save_pending_purchase(sender, draft)
             return (
                 f"Preparé una compra. {purchase_summary(draft)} "
                 "Me falta: " + " y ".join(missing) + "."
             )
+        commit_purchase(sender, draft)
         return (
-            f"Entendí esta compra: {purchase_summary(draft)} "
-            "¿La guardo en Paquetería? Responde Sí o No. "
-            "También puedes enviarme más fotos antes de confirmar."
+            f"Compra guardada: {purchase_summary(draft)} "
+            "Se sincronizará automáticamente con Paquetería."
         )
 
     return None
