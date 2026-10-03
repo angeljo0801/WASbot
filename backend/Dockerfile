@@ -9,8 +9,11 @@ COPY app.py .
 COPY combo.py .
 COPY remittances.py .
 COPY assistant_features.py .
+COPY gmail_oauth.py .
+COPY gmail_parser.py .
+COPY gmail_reconstruction.py .
 COPY main.py .
 
 EXPOSE 8080
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
