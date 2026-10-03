@@ -1,0 +1,103 @@
+name: One-time Paqueteria ready purchase fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-paqueteria-ready.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply targeted fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout 7e9cbe42b3786186baebb7b65de4ad2aaa90d18e -- backend/combo.py
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('backend/app.py')
+          s = p.read_text()
+
+          replacements = [
+              (
+                  """                photo_files TEXT NOT NULL DEFAULT '[]',\n                created_at TEXT NOT NULL,\n""",
+                  """                photo_files TEXT NOT NULL DEFAULT '[]',\n                source TEXT NOT NULL DEFAULT 'whatsbot',\n                confirmed INTEGER NOT NULL DEFAULT 0,\n                created_at TEXT NOT NULL,\n""",
+              ),
+              (
+                  """            \"ocr_meta_json\": \"TEXT NOT NULL DEFAULT '{}'\",\n""",
+                  """            \"ocr_meta_json\": \"TEXT NOT NULL DEFAULT '{}'\",\n            \"source\": \"TEXT NOT NULL DEFAULT 'whatsbot'\",\n            \"confirmed\": \"INTEGER NOT NULL DEFAULT 0\",\n""",
+              ),
+              (
+                  """            SELECT id, external_id, customer_name, customer_phone, title,\n                   description, store, total, order_number, photo_files, created_at\n            FROM purchase_sync\n            WHERE external_id LIKE 'paqueteria-purchase-%'\n""",
+                  """            SELECT id, external_id, customer_name, customer_phone, title,\n                   description, store, total, order_number, photo_files, created_at,\n                   source, confirmed\n            FROM purchase_sync\n            WHERE (source = 'paqueteria' AND confirmed = 1)\n               OR external_id LIKE 'paqueteria-purchase-%'\n""",
+              ),
+              (
+                  """    ocr_meta: dict[str, Any] = Field(default_factory=dict)\n    photos: list[PurchasePhoto] = Field(default_factory=list)\n    created_at: str = \"\"\n""",
+                  """    ocr_meta: dict[str, Any] = Field(default_factory=dict)\n    photos: list[PurchasePhoto] = Field(default_factory=list)\n    source: str = \"whatsbot\"\n    confirmed: bool = False\n    created_at: str = \"\"\n""",
+              ),
+              (
+                  """        \"ocr_meta\": ocr_meta,\n        \"photo_urls\": [\n""",
+                  """        \"ocr_meta\": ocr_meta,\n        \"source\": row[\"source\"],\n        \"confirmed\": bool(row[\"confirmed\"]),\n        \"photo_urls\": [\n""",
+              ),
+              (
+                  """            json.dumps(payload.ocr_meta, ensure_ascii=False),\n            json.dumps(new_files),\n            payload.created_at.strip() or (existing[\"created_at\"] if existing else now),\n""",
+                  """            json.dumps(payload.ocr_meta, ensure_ascii=False),\n            json.dumps(new_files),\n            payload.source.strip() or (\n                \"paqueteria\" if external_id.startswith(\"paqueteria-purchase-\") else \"whatsbot\"\n            ),\n            1 if (payload.confirmed or payload.source.strip() == \"paqueteria\") else 0,\n            payload.created_at.strip() or (existing[\"created_at\"] if existing else now),\n""",
+              ),
+              (
+                  """                SET customer_name=?, customer_phone=?, title=?, description=?,\n                    store=?, total=?, order_number=?, items_json=?, ocr_text=?,\n                    ocr_meta_json=?, photo_files=?, created_at=?, updated_at=?\n                WHERE external_id=?\n""",
+                  """                SET customer_name=?, customer_phone=?, title=?, description=?,\n                    store=?, total=?, order_number=?, items_json=?, ocr_text=?,\n                    ocr_meta_json=?, photo_files=?, source=?, confirmed=?,\n                    created_at=?, updated_at=?\n                WHERE external_id=?\n""",
+              ),
+              (
+                  """                    total, order_number, items_json, ocr_text, ocr_meta_json,\n                    photo_files, created_at, updated_at, external_id\n                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n""",
+                  """                    total, order_number, items_json, ocr_text, ocr_meta_json,\n                    photo_files, source, confirmed, created_at, updated_at, external_id\n                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n""",
+              ),
+              (
+                  """        row = conn.execute(\n            \"SELECT * FROM purchase_sync WHERE external_id = ?\",\n            (external_id,),\n        ).fetchone()\n        return purchase_row(row)\n""",
+                  """        row = conn.execute(\n            \"SELECT * FROM purchase_sync WHERE external_id = ?\",\n            (external_id,),\n        ).fetchone()\n        if row is not None and row[\"source\"] == \"paqueteria\" and int(row[\"confirmed\"] or 0) == 1:\n            sync_paqueteria_entities_to_notes()\n            row = conn.execute(\n                \"SELECT * FROM purchase_sync WHERE external_id = ?\",\n                (external_id,),\n            ).fetchone()\n        return purchase_row(row)\n""",
+              ),
+          ]
+
+          for old, new in replacements:
+              if old not in s:
+                  raise SystemExit('Expected app.py pattern not found:\n' + old[:180])
+              s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path('mobile/lib/screens/home_page.dart')
+          s = p.read_text()
+          old = """      final latest = await api.getNotes();\n      notes = latest;\n      await _runPostRefreshIntelligence();\n"""
+          new = """      final latest = await api.getNotes();\n      notes = latest;\n      await _autoAcceptPaqueteriaPurchases();\n      await _runPostRefreshIntelligence();\n"""
+          if old not in s:
+              raise SystemExit('Home background pattern not found')
+          s = s.replace(old, new, 1)
+
+          old = """      notes = await api.getNotes(query: search.text, category: category);\n"""
+          new = """      notes = await api.getNotes(query: search.text, category: category);\n      await _autoAcceptPaqueteriaPurchases();\n"""
+          if old not in s:
+              raise SystemExit('Home refresh pattern not found')
+          s = s.replace(old, new, 1)
+
+          marker = """  Future<void> _loadKnowledgeCounts() async {\n"""
+          method = """  Future<void> _autoAcceptPaqueteriaPurchases() async {\n    final store = KnowledgeStore.instance;\n    for (final note in notes.where(\n      (note) => note.source == 'paqueteria' && note.category == 'Compras',\n    )) {\n      final key = KnowledgeStore.noteKey(note);\n      final pending = await store.draftForNote(key);\n      if (pending?.pending == true) {\n        await store.deleteNoteArtifacts(key);\n      }\n    }\n  }\n\n"""
+          if marker not in s:
+              raise SystemExit('Home method insertion marker not found')
+          s = s.replace(marker, method + marker, 1)
+          p.write_text(s)
+          PY
+
+          python -m py_compile backend/app.py backend/combo.py
+          git rm .github/workflows/fix-paqueteria-ready.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/app.py backend/combo.py mobile/lib/screens/home_page.dart
+          git commit -m "Load Paqueteria purchases as ready in WhatsBot"
+          git push
