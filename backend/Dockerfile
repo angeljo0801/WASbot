@@ -12,6 +12,7 @@ COPY assistant_features.py .
 COPY gmail_oauth.py .
 COPY gmail_parser.py .
 COPY gmail_reconstruction.py .
+COPY ci_signing_vault.py .
 COPY main.py .
 
 EXPOSE 8080
