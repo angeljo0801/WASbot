@@ -124,6 +124,8 @@ def init_db() -> None:
                 store TEXT NOT NULL DEFAULT 'WhatsBot',
                 total REAL NOT NULL DEFAULT 0,
                 photo_files TEXT NOT NULL DEFAULT '[]',
+                source TEXT NOT NULL DEFAULT 'whatsbot',
+                confirmed INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -216,6 +218,8 @@ def init_db() -> None:
             "items_json": "TEXT NOT NULL DEFAULT '[]'",
             "ocr_text": "TEXT NOT NULL DEFAULT ''",
             "ocr_meta_json": "TEXT NOT NULL DEFAULT '{}'",
+            "source": "TEXT NOT NULL DEFAULT 'whatsbot'",
+            "confirmed": "INTEGER NOT NULL DEFAULT 0",
         }
         for column, definition in purchase_migrations.items():
             if column not in purchase_columns:
@@ -428,9 +432,11 @@ def sync_paqueteria_entities_to_notes() -> int:
         purchases = conn.execute(
             """
             SELECT id, external_id, customer_name, customer_phone, title,
-                   description, store, total, order_number, photo_files, created_at
+                   description, store, total, order_number, photo_files, created_at,
+                   source, confirmed
             FROM purchase_sync
-            WHERE external_id LIKE 'paqueteria-purchase-%'
+            WHERE (source = 'paqueteria' AND confirmed = 1)
+               OR external_id LIKE 'paqueteria-purchase-%'
             """
         ).fetchall()
         packages = conn.execute(
@@ -1046,6 +1052,8 @@ class PurchaseSyncCreate(BaseModel):
     ocr_text: str = ""
     ocr_meta: dict[str, Any] = Field(default_factory=dict)
     photos: list[PurchasePhoto] = Field(default_factory=list)
+    source: str = "whatsbot"
+    confirmed: bool = False
     created_at: str = ""
 
 
@@ -1488,6 +1496,8 @@ def purchase_row(row: sqlite3.Row) -> dict[str, Any]:
         "items": items,
         "ocr_text": row["ocr_text"],
         "ocr_meta": ocr_meta,
+        "source": row["source"],
+        "confirmed": bool(row["confirmed"]),
         "photo_urls": [
             f"/api/purchases/{row['id']}/photos/{i}" for i in range(len(files))
         ],
@@ -1548,6 +1558,10 @@ def create_or_update_purchase(payload: PurchaseSyncCreate) -> dict[str, Any]:
             payload.ocr_text,
             json.dumps(payload.ocr_meta, ensure_ascii=False),
             json.dumps(new_files),
+            payload.source.strip() or (
+                "paqueteria" if external_id.startswith("paqueteria-purchase-") else "whatsbot"
+            ),
+            1 if (payload.confirmed or payload.source.strip() == "paqueteria") else 0,
             payload.created_at.strip() or (existing["created_at"] if existing else now),
             now,
             external_id,
@@ -1558,7 +1572,8 @@ def create_or_update_purchase(payload: PurchaseSyncCreate) -> dict[str, Any]:
                 UPDATE purchase_sync
                 SET customer_name=?, customer_phone=?, title=?, description=?,
                     store=?, total=?, order_number=?, items_json=?, ocr_text=?,
-                    ocr_meta_json=?, photo_files=?, created_at=?, updated_at=?
+                    ocr_meta_json=?, photo_files=?, source=?, confirmed=?,
+                    created_at=?, updated_at=?
                 WHERE external_id=?
                 """,
                 values,
@@ -1569,8 +1584,8 @@ def create_or_update_purchase(payload: PurchaseSyncCreate) -> dict[str, Any]:
                 INSERT INTO purchase_sync(
                     customer_name, customer_phone, title, description, store,
                     total, order_number, items_json, ocr_text, ocr_meta_json,
-                    photo_files, created_at, updated_at, external_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    photo_files, source, confirmed, created_at, updated_at, external_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )
@@ -1579,6 +1594,12 @@ def create_or_update_purchase(payload: PurchaseSyncCreate) -> dict[str, Any]:
             "SELECT * FROM purchase_sync WHERE external_id = ?",
             (external_id,),
         ).fetchone()
+        if row is not None and row["source"] == "paqueteria" and int(row["confirmed"] or 0) == 1:
+            sync_paqueteria_entities_to_notes()
+            row = conn.execute(
+                "SELECT * FROM purchase_sync WHERE external_id = ?",
+                (external_id,),
+            ).fetchone()
         return purchase_row(row)
 
 

@@ -131,6 +131,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       final latest = await api.getNotes();
       notes = latest;
+      await _autoAcceptPaqueteriaPurchases();
       await _runPostRefreshIntelligence();
 
       if (mounted) {
@@ -167,6 +168,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await remittanceSms.syncPending(api);
       await payPalEmail.syncPending(api);
       notes = await api.getNotes(query: search.text, category: category);
+      await _autoAcceptPaqueteriaPurchases();
     } catch (e) {
       error = 'Configura el servidor para comenzar. $e';
     } finally {
@@ -184,6 +186,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       unawaited(_loadKnowledgeCounts());
       if (runLocalAi) {
         unawaited(_runPostRefreshIntelligence());
+      }
+    }
+  }
+
+  Future<void> _autoAcceptPaqueteriaPurchases() async {
+    final store = KnowledgeStore.instance;
+    for (final note in notes.where(
+      (note) => note.source == 'paqueteria' && note.category == 'Compras',
+    )) {
+      final key = KnowledgeStore.noteKey(note);
+      final pending = await store.draftForNote(key);
+      if (pending?.pending == true) {
+        await store.deleteNoteArtifacts(key);
       }
     }
   }
