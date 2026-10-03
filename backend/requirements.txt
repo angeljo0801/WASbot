@@ -3,3 +3,4 @@ uvicorn[standard]==0.35.0
 twilio==9.8.0
 python-multipart==0.0.20
 tzdata>=2025.2
+PyJWT[crypto]==2.10.1
