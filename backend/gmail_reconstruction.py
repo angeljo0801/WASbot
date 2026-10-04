@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import FileResponse
 
-from gmail_oauth import access_token, require_key, request_json
+from gmail_oauth import active_account_tokens, require_key, request_json
 from gmail_parser import (
     carrier_for,
     estimated_delivery,
@@ -55,28 +56,29 @@ def header(payload: dict[str, Any], name: str) -> str:
     return ''
 
 
-def save_image(data: bytes, message_id: str, suffix: str, mime: str) -> dict[str, str] | None:
+def save_image(data: bytes, account_id: int, message_id: str, suffix: str, mime: str) -> dict[str, Any] | None:
     if not data:
         return None
     extension = mime.split('/')[-1].lower().replace('jpeg', 'jpg')
     if extension not in {'jpg', 'png', 'webp', 'gif'}:
         extension = 'jpg'
     safe_suffix = ''.join(x for x in suffix if x.isalnum())[:18] or 'image'
-    name = f'{message_id}_{safe_suffix}.{extension}'
+    name = f'a{account_id}_{message_id}_{safe_suffix}.{extension}'
     path = MEDIA_DIR / name
     if not path.exists():
         path.write_bytes(data)
-    return {'name': name, 'url': f'/api/gmail/media/{name}'}
+    return {'name': name, 'url': f'/api/gmail/media/{name}', 'accountId': account_id}
 
 
 def walk_parts(
     part: dict[str, Any],
     *,
+    account_id: int,
     message_id: str,
     token: str,
     plain: list[str],
     html_parts: list[str],
-    images: list[dict[str, str]],
+    images: list[dict[str, Any]],
 ) -> None:
     mime = str(part.get('mimeType') or '').lower()
     body = part.get('body') or {}
@@ -88,7 +90,7 @@ def walk_parts(
         elif mime == 'text/html':
             html_parts.append(data.decode('utf-8', errors='replace'))
         elif mime.startswith('image/'):
-            saved = save_image(data, message_id, str(len(images)), mime)
+            saved = save_image(data, account_id, message_id, str(len(images)), mime)
             if saved and saved not in images:
                 images.append(saved)
     attachment_id = body.get('attachmentId')
@@ -100,6 +102,7 @@ def walk_parts(
             )
             saved = save_image(
                 decode_urlsafe(str(payload.get('data') or '')),
+                account_id,
                 message_id,
                 str(attachment_id),
                 mime,
@@ -111,6 +114,7 @@ def walk_parts(
     for child in part.get('parts') or []:
         walk_parts(
             child,
+            account_id=account_id,
             message_id=message_id,
             token=token,
             plain=plain,
@@ -119,13 +123,14 @@ def walk_parts(
         )
 
 
-def record(message: dict[str, Any], token: str) -> dict[str, Any]:
+def record(message: dict[str, Any], token: str, account_id: int, source_email: str) -> dict[str, Any]:
     payload = message.get('payload') or {}
     plain: list[str] = []
     html_parts: list[str] = []
-    images: list[dict[str, str]] = []
+    images: list[dict[str, Any]] = []
     walk_parts(
         payload,
+        account_id=account_id,
         message_id=str(message.get('id') or ''),
         token=token,
         plain=plain,
@@ -135,8 +140,12 @@ def record(message: dict[str, Any], token: str) -> dict[str, Any]:
     body = '\n'.join(plain).strip()
     if not body and html_parts:
         body = strip_html('\n'.join(html_parts))
+    for image in images:
+        image['sourceEmail'] = source_email
     return {
         'id': str(message.get('id') or ''),
+        'accountId': account_id,
+        'sourceEmail': source_email,
         'internalDate': int(message.get('internalDate') or 0),
         'subject': header(payload, 'Subject'),
         'from': header(payload, 'From'),
@@ -147,11 +156,7 @@ def record(message: dict[str, Any], token: str) -> dict[str, Any]:
     }
 
 
-def reconstruct(order: str = '', tracking: str = '') -> dict[str, Any]:
-    seed = order.strip() or tracking.strip()
-    if not seed:
-        raise HTTPException(status_code=422, detail='Provide order_number or tracking')
-    token = access_token()
+def search_account(account_id: int, source_email: str, token: str, seed: str) -> list[dict[str, Any]]:
     safe_seed = seed.replace('"', '')
     query = urllib.parse.urlencode({'q': f'"{safe_seed}"', 'maxResults': '25'})
     listing = gmail_json('messages?' + query, token)
@@ -162,10 +167,44 @@ def reconstruct(order: str = '', tracking: str = '') -> dict[str, Any]:
             continue
         try:
             full = gmail_json(f'messages/{urllib.parse.quote(message_id)}?format=full', token)
-            records.append(record(full, token))
+            records.append(record(full, token, account_id, source_email))
         except Exception:
             continue
+    return records
+
+
+def reconstruct(order: str = '', tracking: str = '') -> dict[str, Any]:
+    seed = order.strip() or tracking.strip()
+    if not seed:
+        raise HTTPException(status_code=422, detail='Provide order_number or tracking')
+
+    accounts = active_account_tokens()
+    if not accounts:
+        raise HTTPException(status_code=409, detail='No enabled Gmail accounts are connected')
+
+    records: list[dict[str, Any]] = []
+    account_errors: list[dict[str, Any]] = []
+    workers = max(1, min(4, len(accounts)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(search_account, account_id, email, token, seed): (account_id, email)
+            for account_id, email, token in accounts
+        }
+        for future in as_completed(futures):
+            account_id, email = futures[future]
+            try:
+                records.extend(future.result())
+            except Exception as exc:
+                detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+                account_errors.append({'accountId': account_id, 'email': email, 'error': str(detail)})
+
+    # Gmail message IDs are only unique inside an account.
+    unique: dict[tuple[int, str], dict[str, Any]] = {}
+    for row in records:
+        unique[(int(row.get('accountId') or 0), str(row.get('id') or ''))] = row
+    records = list(unique.values())
     records.sort(key=lambda x: int(x.get('internalDate') or 0))
+
     combined = '\n'.join(
         f"{r.get('subject','')}\n{r.get('from','')}\n{r.get('body','')}"
         for r in records
@@ -178,15 +217,21 @@ def reconstruct(order: str = '', tracking: str = '') -> dict[str, Any]:
         carrier = carrier_for(value, combined)
         if carrier not in carriers:
             carriers.append(carrier)
+
     urls: list[str] = []
-    attachments: list[dict[str, str]] = []
+    attachments: list[dict[str, Any]] = []
+    source_emails: list[str] = []
     for row in records:
+        source_email = str(row.get('sourceEmail') or '')
+        if source_email and source_email not in source_emails:
+            source_emails.append(source_email)
         for url in row.get('remoteImages') or []:
             if url not in urls:
                 urls.append(url)
         for image in row.get('attachmentImages') or []:
             if image not in attachments:
                 attachments.append(image)
+
     return {
         'found': bool(records),
         'query': seed,
@@ -210,7 +255,13 @@ def reconstruct(order: str = '', tracking: str = '') -> dict[str, Any]:
         'emailSubjects': [str(r.get('subject') or '') for r in records if r.get('subject')],
         'emailFrom': [str(r.get('from') or '') for r in records if r.get('from')],
         'lastEmailDate': str(records[-1].get('date') or '') if records else '',
-        'messageIds': [str(r.get('id') or '') for r in records],
+        'messageIds': [f"{r.get('accountId')}:{r.get('id')}" for r in records],
+        'sourceEmails': source_emails,
+        'accountsSearched': [
+            {'id': account_id, 'email': email}
+            for account_id, email, _token in accounts
+        ],
+        'accountErrors': account_errors,
         'syncedAt': datetime.now(timezone.utc).isoformat(),
     }
 
