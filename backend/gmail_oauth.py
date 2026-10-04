@@ -12,7 +12,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
 APP_API_KEY = os.getenv('APP_API_KEY', 'dev-mobile-key').strip()
@@ -34,6 +34,7 @@ def db() -> sqlite3.Connection:
 
 
 def init_gmail_auth() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     with closing(db()) as conn:
         conn.executescript('''
         CREATE TABLE IF NOT EXISTS gmail_auth(
@@ -43,7 +44,41 @@ def init_gmail_auth() -> None:
           expires_at REAL NOT NULL DEFAULT 0,
           email TEXT NOT NULL DEFAULT ''
         );
+
+        CREATE TABLE IF NOT EXISTS gmail_accounts(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          email TEXT NOT NULL DEFAULT '',
+          access_token TEXT NOT NULL DEFAULT '',
+          refresh_token TEXT NOT NULL DEFAULT '',
+          expires_at REAL NOT NULL DEFAULT 0,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          is_primary INTEGER NOT NULL DEFAULT 0,
+          created_at REAL NOT NULL DEFAULT 0,
+          updated_at REAL NOT NULL DEFAULT 0
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_gmail_accounts_email_nonempty
+          ON gmail_accounts(email) WHERE email != '';
         ''')
+
+        # One-time migration from the old singleton table. Keep the legacy table
+        # for backward compatibility, but all new logic uses gmail_accounts.
+        count = int(conn.execute('SELECT COUNT(*) FROM gmail_accounts').fetchone()[0])
+        legacy = conn.execute('SELECT * FROM gmail_auth WHERE id=1').fetchone()
+        if count == 0 and legacy and (legacy['refresh_token'] or legacy['access_token']):
+            now = time.time()
+            conn.execute('''
+            INSERT INTO gmail_accounts(
+              email,access_token,refresh_token,expires_at,enabled,is_primary,created_at,updated_at
+            ) VALUES(?,?,?,?,1,1,?,?)
+            ''', (
+                str(legacy['email'] or ''),
+                str(legacy['access_token'] or ''),
+                str(legacy['refresh_token'] or ''),
+                float(legacy['expires_at'] or 0),
+                now,
+                now,
+            ))
         conn.commit()
 
 
@@ -64,25 +99,35 @@ def _b64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + padding)
 
 
-def create_oauth_state() -> str:
-    payload = f'{int(time.time())}.{secrets.token_urlsafe(18)}'.encode()
+def create_oauth_state(account_id: int | None = None) -> str:
+    payload = json.dumps({
+        'ts': int(time.time()),
+        'nonce': secrets.token_urlsafe(18),
+        'account_id': account_id,
+    }, separators=(',', ':')).encode()
     signature = hmac.new(STATE_SECRET, payload, hashlib.sha256).digest()
     return f'{_b64url_encode(payload)}.{_b64url_encode(signature)}'
 
 
-def validate_oauth_state(value: str) -> bool:
+def decode_oauth_state(value: str) -> dict[str, Any] | None:
     try:
         encoded_payload, encoded_signature = value.split('.', 1)
         payload = _b64url_decode(encoded_payload)
         signature = _b64url_decode(encoded_signature)
         expected = hmac.new(STATE_SECRET, payload, hashlib.sha256).digest()
         if not hmac.compare_digest(signature, expected):
-            return False
-        created_at_text, _nonce = payload.decode().split('.', 1)
-        age = time.time() - int(created_at_text)
-        return -60 <= age <= STATE_TTL_SECONDS
+            return None
+        parsed = json.loads(payload.decode())
+        age = time.time() - int(parsed.get('ts') or 0)
+        if not (-60 <= age <= STATE_TTL_SECONDS):
+            return None
+        return parsed
     except Exception:
-        return False
+        return None
+
+
+def validate_oauth_state(value: str) -> bool:
+    return decode_oauth_state(value) is not None
 
 
 def request_json(url: str, *, method: str = 'GET', headers: dict[str, str] | None = None, form: dict[str, str] | None = None) -> dict[str, Any]:
@@ -105,38 +150,114 @@ def request_json(url: str, *, method: str = 'GET', headers: dict[str, str] | Non
         raise HTTPException(status_code=502, detail=f'Google API error: {detail}') from exc
 
 
-def auth_row() -> sqlite3.Row | None:
+def account_row(account_id: int) -> sqlite3.Row | None:
     with closing(db()) as conn:
-        return conn.execute('SELECT * FROM gmail_auth WHERE id=1').fetchone()
+        return conn.execute('SELECT * FROM gmail_accounts WHERE id=?', (account_id,)).fetchone()
 
 
-def save_tokens(data: dict[str, Any], email: str = '') -> None:
-    old = auth_row()
-    refresh = str(data.get('refresh_token') or (old['refresh_token'] if old else ''))
+def accounts_rows(*, enabled_only: bool = False) -> list[sqlite3.Row]:
+    with closing(db()) as conn:
+        where = 'WHERE enabled=1' if enabled_only else ''
+        return conn.execute(
+            f'''SELECT * FROM gmail_accounts {where}
+                ORDER BY is_primary DESC, enabled DESC, lower(email), id'''
+        ).fetchall()
+
+
+def auth_row() -> sqlite3.Row | None:
+    # Backward-compatible helper: primary account first, otherwise first account.
+    rows = accounts_rows()
+    return rows[0] if rows else None
+
+
+def _public_account(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        'id': int(row['id']),
+        'email': str(row['email'] or ''),
+        'enabled': bool(row['enabled']),
+        'primary': bool(row['is_primary']),
+        'connected': bool(row['refresh_token'] or row['access_token']),
+    }
+
+
+def save_tokens(data: dict[str, Any], email: str = '', account_id: int | None = None) -> int:
     access = str(data.get('access_token') or '')
     expires = time.time() + max(60, int(data.get('expires_in') or 3600) - 60)
+    email = email.strip()
+    now = time.time()
+
     with closing(db()) as conn:
-        conn.execute('''
-        INSERT INTO gmail_auth(id,access_token,refresh_token,expires_at,email)
-        VALUES(1,?,?,?,?)
-        ON CONFLICT(id) DO UPDATE SET
-          access_token=excluded.access_token,
-          refresh_token=excluded.refresh_token,
-          expires_at=excluded.expires_at,
-          email=CASE WHEN excluded.email!='' THEN excluded.email ELSE gmail_auth.email END
-        ''', (access, refresh, expires, email))
+        target = None
+        if account_id is not None:
+            target = conn.execute('SELECT * FROM gmail_accounts WHERE id=?', (account_id,)).fetchone()
+
+        # If Google returned an email already connected in a different row, use
+        # that row instead of creating a duplicate account.
+        by_email = None
+        if email:
+            by_email = conn.execute('SELECT * FROM gmail_accounts WHERE lower(email)=lower(?)', (email,)).fetchone()
+        if by_email is not None and (target is None or int(by_email['id']) != int(target['id'])):
+            target = by_email
+
+        if target is None:
+            count = int(conn.execute('SELECT COUNT(*) FROM gmail_accounts').fetchone()[0])
+            refresh = str(data.get('refresh_token') or '')
+            cur = conn.execute('''
+            INSERT INTO gmail_accounts(
+              email,access_token,refresh_token,expires_at,enabled,is_primary,created_at,updated_at
+            ) VALUES(?,?,?,?,1,?,?,?)
+            ''', (email, access, refresh, expires, 1 if count == 0 else 0, now, now))
+            saved_id = int(cur.lastrowid)
+        else:
+            saved_id = int(target['id'])
+            refresh = str(data.get('refresh_token') or target['refresh_token'] or '')
+            conn.execute('''
+            UPDATE gmail_accounts SET
+              email=CASE WHEN ?!='' THEN ? ELSE email END,
+              access_token=?,
+              refresh_token=?,
+              expires_at=?,
+              enabled=1,
+              updated_at=?
+            WHERE id=?
+            ''', (email, email, access, refresh, expires, now, saved_id))
+
+        # Guarantee exactly one primary account whenever at least one exists.
+        primary_count = int(conn.execute('SELECT COUNT(*) FROM gmail_accounts WHERE is_primary=1').fetchone()[0])
+        if primary_count == 0:
+            conn.execute('UPDATE gmail_accounts SET is_primary=CASE WHEN id=? THEN 1 ELSE 0 END', (saved_id,))
+
+        # Keep legacy singleton data synchronized with the primary account for
+        # any older code path that still reads gmail_auth.
+        primary = conn.execute('SELECT * FROM gmail_accounts ORDER BY is_primary DESC,id LIMIT 1').fetchone()
+        if primary is not None:
+            conn.execute('''
+            INSERT INTO gmail_auth(id,access_token,refresh_token,expires_at,email)
+            VALUES(1,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET
+              access_token=excluded.access_token,
+              refresh_token=excluded.refresh_token,
+              expires_at=excluded.expires_at,
+              email=excluded.email
+            ''', (
+                str(primary['access_token'] or ''),
+                str(primary['refresh_token'] or ''),
+                float(primary['expires_at'] or 0),
+                str(primary['email'] or ''),
+            ))
         conn.commit()
+        return saved_id
 
 
-def access_token() -> str:
-    row = auth_row()
+def access_token_for_account(account_id: int) -> str:
+    row = account_row(account_id)
     if row is None:
-        raise HTTPException(status_code=409, detail='Gmail is not connected')
+        raise HTTPException(status_code=404, detail='Gmail account not found')
     if row['access_token'] and float(row['expires_at'] or 0) > time.time() + 30:
         return str(row['access_token'])
     refresh = str(row['refresh_token'] or '')
     if not refresh:
-        raise HTTPException(status_code=409, detail='Reconnect Gmail')
+        raise HTTPException(status_code=409, detail=f'Reconnect Gmail account {row["email"] or account_id}')
     if not CLIENT_ID or not CLIENT_SECRET:
         raise HTTPException(status_code=503, detail='Gmail OAuth is not configured')
     data = request_json('https://oauth2.googleapis.com/token', method='POST', form={
@@ -145,45 +266,145 @@ def access_token() -> str:
         'refresh_token': refresh,
         'grant_type': 'refresh_token',
     })
-    save_tokens(data)
+    save_tokens(data, str(row['email'] or ''), account_id)
     return str(data.get('access_token') or '')
+
+
+def access_token() -> str:
+    rows = [r for r in accounts_rows(enabled_only=True) if r['refresh_token'] or r['access_token']]
+    if not rows:
+        raise HTTPException(status_code=409, detail='Gmail is not connected')
+    return access_token_for_account(int(rows[0]['id']))
+
+
+def active_account_tokens() -> list[tuple[int, str, str]]:
+    out: list[tuple[int, str, str]] = []
+    for row in accounts_rows(enabled_only=True):
+        if not (row['refresh_token'] or row['access_token']):
+            continue
+        account_id = int(row['id'])
+        try:
+            token = access_token_for_account(account_id)
+        except HTTPException:
+            continue
+        if token:
+            out.append((account_id, str(row['email'] or ''), token))
+    return out
 
 
 @router.get('/api/gmail/status')
 def status(x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
     require_key(x_api_key)
-    row = auth_row()
+    rows = accounts_rows()
+    connected = [r for r in rows if r['refresh_token'] or r['access_token']]
+    enabled = [r for r in connected if r['enabled']]
+    primary = rows[0] if rows else None
     return {
         'configured': bool(CLIENT_ID and CLIENT_SECRET),
-        'connected': bool(row and (row['refresh_token'] or row['access_token'])),
-        'email': str(row['email'] or '') if row else '',
+        'connected': bool(connected),
+        'email': str(primary['email'] or '') if primary else '',
+        'accountCount': len(connected),
+        'enabledAccountCount': len(enabled),
+        'accounts': [_public_account(r) for r in rows],
         'redirectUri': REDIRECT_URI,
     }
 
 
+@router.get('/api/gmail/accounts')
+def gmail_accounts(x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+    require_key(x_api_key)
+    rows = accounts_rows()
+    return {
+        'configured': bool(CLIENT_ID and CLIENT_SECRET),
+        'redirectUri': REDIRECT_URI,
+        'accounts': [_public_account(r) for r in rows],
+    }
+
+
 @router.get('/api/gmail/auth-url')
-def auth_url(x_api_key: str | None = Header(default=None)) -> dict[str, str]:
+def auth_url(
+    account_id: int | None = Query(default=None),
+    x_api_key: str | None = Header(default=None),
+) -> dict[str, str]:
     require_key(x_api_key)
     if not CLIENT_ID or not CLIENT_SECRET:
         raise HTTPException(status_code=503, detail='Configure GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET on Railway')
-    state = create_oauth_state()
+    login_hint = ''
+    if account_id is not None:
+        row = account_row(account_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail='Gmail account not found')
+        login_hint = str(row['email'] or '')
+    state = create_oauth_state(account_id)
     params = {
         'client_id': CLIENT_ID,
         'redirect_uri': REDIRECT_URI,
         'response_type': 'code',
         'scope': 'openid email https://www.googleapis.com/auth/gmail.readonly',
         'access_type': 'offline',
-        'prompt': 'consent',
+        'include_granted_scopes': 'true',
+        'prompt': 'consent select_account',
         'state': state,
     }
+    if login_hint:
+        params['login_hint'] = login_hint
     return {'url': 'https://accounts.google.com/o/oauth2/v2/auth?' + urllib.parse.urlencode(params)}
+
+
+@router.post('/api/gmail/accounts/{account_id}/enabled')
+def set_account_enabled(
+    account_id: int,
+    enabled: bool = Query(...),
+    x_api_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    require_key(x_api_key)
+    with closing(db()) as conn:
+        row = conn.execute('SELECT * FROM gmail_accounts WHERE id=?', (account_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail='Gmail account not found')
+        conn.execute('UPDATE gmail_accounts SET enabled=?,updated_at=? WHERE id=?', (1 if enabled else 0, time.time(), account_id))
+        conn.commit()
+    fresh = account_row(account_id)
+    return _public_account(fresh) if fresh is not None else {'id': account_id}
+
+
+@router.post('/api/gmail/accounts/{account_id}/primary')
+def set_primary_account(account_id: int, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+    require_key(x_api_key)
+    with closing(db()) as conn:
+        row = conn.execute('SELECT * FROM gmail_accounts WHERE id=?', (account_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail='Gmail account not found')
+        conn.execute('UPDATE gmail_accounts SET is_primary=CASE WHEN id=? THEN 1 ELSE 0 END', (account_id,))
+        conn.execute('UPDATE gmail_accounts SET enabled=1,updated_at=? WHERE id=?', (time.time(), account_id))
+        conn.commit()
+    fresh = account_row(account_id)
+    return _public_account(fresh) if fresh is not None else {'id': account_id}
+
+
+@router.delete('/api/gmail/accounts/{account_id}')
+def delete_account(account_id: int, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+    require_key(x_api_key)
+    with closing(db()) as conn:
+        row = conn.execute('SELECT * FROM gmail_accounts WHERE id=?', (account_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail='Gmail account not found')
+        was_primary = bool(row['is_primary'])
+        conn.execute('DELETE FROM gmail_accounts WHERE id=?', (account_id,))
+        if was_primary:
+            replacement = conn.execute('SELECT id FROM gmail_accounts ORDER BY enabled DESC,id LIMIT 1').fetchone()
+            if replacement is not None:
+                conn.execute('UPDATE gmail_accounts SET is_primary=CASE WHEN id=? THEN 1 ELSE 0 END', (int(replacement['id']),))
+        conn.commit()
+    return {'ok': True, 'deletedId': account_id}
 
 
 @router.get('/api/gmail/callback', response_class=HTMLResponse)
 def callback(code: str = '', state: str = '', error: str = '') -> HTMLResponse:
     if error:
         return HTMLResponse('<h2>Gmail no se conectó.</h2>', status_code=400)
-    if not validate_oauth_state(state):
+    state_data = decode_oauth_state(state)
+    if state_data is None:
         return HTMLResponse('<h2>Autorización inválida o vencida.</h2>', status_code=400)
     data = request_json('https://oauth2.googleapis.com/token', method='POST', form={
         'code': code,
@@ -200,5 +421,12 @@ def callback(code: str = '', state: str = '', error: str = '') -> HTMLResponse:
             email = str(profile.get('email') or '')
         except Exception:
             pass
-    save_tokens(data, email)
-    return HTMLResponse('<h2>Gmail conectado con Paquetería.</h2><p>Ya puedes volver a la app.</p>')
+    raw_id = state_data.get('account_id')
+    account_id = int(raw_id) if raw_id not in (None, '') else None
+    saved_id = save_tokens(data, email, account_id)
+    label = email or f'Cuenta #{saved_id}'
+    return HTMLResponse(
+        '<h2>Gmail conectado con Paquetería.</h2>'
+        f'<p>{label}</p>'
+        '<p>Ya puedes volver a la app y tocar Actualizar.</p>'
+    )
