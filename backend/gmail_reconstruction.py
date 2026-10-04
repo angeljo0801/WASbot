@@ -137,9 +137,23 @@ def record(message: dict[str, Any], token: str, account_id: int, source_email: s
         html_parts=html_parts,
         images=images,
     )
-    body = '\n'.join(plain).strip()
-    if not body and html_parts:
-        body = strip_html('\n'.join(html_parts))
+
+    # Keep both representations. Many store emails include a very short plain
+    # version while product names/quantities live only in HTML table cells or
+    # image alt/title attributes. gmail_parser.strip_html preserves those image
+    # labels so the reconstruction can identify the actual products.
+    plain_text = '\n'.join(plain).strip()
+    html_text = strip_html('\n'.join(html_parts)).strip() if html_parts else ''
+    body_parts: list[str] = []
+    if plain_text:
+        body_parts.append(plain_text)
+    if html_text:
+        plain_compact = recompact(plain_text)
+        html_compact = recompact(html_text)
+        if not plain_compact or html_compact not in plain_compact:
+            body_parts.append(html_text)
+    body = '\n'.join(body_parts).strip()
+
     for image in images:
         image['sourceEmail'] = source_email
     return {
@@ -154,6 +168,10 @@ def record(message: dict[str, Any], token: str, account_id: int, source_email: s
         'remoteImages': remote_images(html_parts),
         'attachmentImages': images,
     }
+
+
+def recompact(value: str) -> str:
+    return ' '.join(value.lower().split())
 
 
 def search_account(account_id: int, source_email: str, token: str, seed: str) -> list[dict[str, Any]]:
