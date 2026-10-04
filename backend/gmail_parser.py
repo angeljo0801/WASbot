@@ -3,10 +3,27 @@ import re
 from typing import Any
 
 
+def _html_image_text(match: re.Match[str]) -> str:
+    tag = match.group(0)
+    for attr in ('alt', 'title'):
+        found = re.search(
+            rf'''(?is)\b{attr}\s*=\s*["']([^"']+)["']''',
+            tag,
+        )
+        if found:
+            text = html.unescape(found.group(1)).strip()
+            if text:
+                return f'\n{text}\n'
+    return ' '
+
+
 def strip_html(value: str) -> str:
+    # Product names in commerce emails are frequently present only as image
+    # alt/title text. Preserve those labels before dropping the HTML tags.
+    value = re.sub(r'(?is)<img\b[^>]*>', _html_image_text, value)
     value = re.sub(r'(?is)<(script|style).*?>.*?</\1>', ' ', value)
     value = re.sub(r'(?i)<br\s*/?>', '\n', value)
-    value = re.sub(r'(?i)</(p|div|tr|li|h[1-6])>', '\n', value)
+    value = re.sub(r'(?i)</(p|div|tr|td|th|li|h[1-6])>', '\n', value)
     value = re.sub(r'(?is)<[^>]+>', ' ', value)
     value = html.unescape(value).replace('\r', '')
     value = re.sub(r'[ \t]+', ' ', value)
@@ -157,36 +174,167 @@ def ship_to(text: str) -> str:
     return match.group(1).strip(' .') if match else ''
 
 
+_PRICE = re.compile(
+    r'(?i)(?:USD\s*)?\$\s*([0-9][0-9,]*\.[0-9]{2})|'
+    r'\b([0-9][0-9,]*\.[0-9]{2})\s*USD\b'
+)
+_QTY = re.compile(
+    r'(?i)(?:\bqty\.?|\bquantity|\bcantidad|\bquantit[yé])\s*[:#-]?\s*(\d{1,3})\b|'
+    r'\b[x×]\s*(\d{1,3})\b|'
+    r'\b(\d{1,3})\s*[x×]\b'
+)
+
+
+def _price(line: str) -> float:
+    match = _PRICE.search(line)
+    if not match:
+        return 0.0
+    raw = next((g for g in match.groups() if g), '')
+    try:
+        return float(raw.replace(',', ''))
+    except ValueError:
+        return 0.0
+
+
+def _qty(line: str) -> int:
+    match = _QTY.search(line)
+    if not match:
+        return 1
+    raw = next((g for g in match.groups() if g), '1')
+    try:
+        value = int(raw)
+    except ValueError:
+        return 1
+    return max(1, min(value, 999))
+
+
+def _clean_item_name(value: str) -> str:
+    value = _PRICE.sub(' ', value)
+    value = _QTY.sub(' ', value)
+    value = re.sub(
+        r'(?i)\b(?:price|precio|unit price|item price|qty|quantity|cantidad)\s*[:#-]?\s*',
+        ' ',
+        value,
+    )
+    value = re.sub(r'\s+', ' ', value).strip(' -:|•·–—')
+    return value
+
+
+def _looks_like_item_name(value: str) -> bool:
+    line = _clean_item_name(value)
+    lower = line.lower()
+    if len(line) < 3 or len(line) > 180:
+        return False
+    if not re.search(r'[A-Za-zÀ-ÿ]', line):
+        return False
+    if re.fullmatch(r'[A-Z0-9-]{8,}', line):
+        return False
+    if re.search(r'https?://|www\.|unsubscribe|view in browser', lower):
+        return False
+    blocked_exact = {
+        'subtotal', 'tax', 'sales tax', 'shipping', 'delivery', 'discount',
+        'total', 'order total', 'grand total', 'payment', 'payment method',
+        'gift card', 'impuesto', 'envío', 'envio', 'descuento', 'tracking',
+        'track package', 'track your package', 'view order', 'view more',
+        'ver pedido', 'ver más', 'ver mas', 'download app', 'google play',
+        'app store', 'bonus points', 'order summary', 'resumen del pedido',
+        'ships from', 'sold by', 'color', 'size', 'talla', 'quantity',
+        'cantidad', 'qty', 'free shipping', 'returns', 'return policy',
+    }
+    if lower in blocked_exact:
+        return False
+    blocked_fragments = (
+        'privacy policy', 'terms of use', 'customer service', 'contact us',
+        'download our app', 'get the app', 'manage preferences', 'copyright',
+        'all rights reserved', 'estimated delivery', 'delivery date',
+        'order number', 'pedido número', 'pedido numero', 'tracking number',
+        'shipping address', 'billing address', 'payment method',
+    )
+    if any(fragment in lower for fragment in blocked_fragments):
+        return False
+    return True
+
+
 def items(text: str) -> list[dict[str, Any]]:
-    blocked = ('subtotal', 'tax', 'shipping', 'discount', 'total', 'payment', 'gift card', 'impuesto', 'envío')
-    result: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for raw in text.splitlines():
-        line = re.sub(r'\s+', ' ', raw).strip()
-        if len(line) < 5 or len(line) > 220:
+    # Commerce emails use many layouts. Some put product + price on one line,
+    # others split name, quantity and price across adjacent table cells. Build
+    # candidates from both forms and keep the maximum quantity seen so repeated
+    # confirmation/shipping/delivery emails do not multiply the order quantity.
+    lines = [re.sub(r'\s+', ' ', raw).strip() for raw in text.splitlines()]
+    lines = [line for line in lines if line]
+    found: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+
+    def add(name_raw: str, *, price: float = 0.0, qty: int = 1) -> None:
+        name = _clean_item_name(name_raw)
+        if not _looks_like_item_name(name):
+            return
+        key = re.sub(r'[^a-z0-9]+', ' ', name.lower()).strip()
+        if not key:
+            return
+        if key not in found:
+            found[key] = {
+                'name': name,
+                'price': round(max(0.0, price), 2),
+                'qty': max(1, qty),
+                'received': False,
+                'source': 'gmail',
+            }
+            order.append(key)
+        else:
+            row = found[key]
+            row['qty'] = max(int(row.get('qty') or 1), max(1, qty))
+            if float(row.get('price') or 0) <= 0 and price > 0:
+                row['price'] = round(price, 2)
+
+    # Name/price/quantity on the same line.
+    for line in lines:
+        price = _price(line)
+        if price > 0:
+            candidate = _clean_item_name(line)
+            if _looks_like_item_name(candidate):
+                add(candidate, price=price, qty=_qty(line))
+
+    # Quantity attached to a product name even when price is elsewhere/missing.
+    for line in lines:
+        if not _QTY.search(line):
             continue
-        if any(x in line.lower() for x in blocked):
+        candidate = _clean_item_name(line)
+        if _looks_like_item_name(candidate):
+            add(candidate, price=_price(line), qty=_qty(line))
+
+    # Split table cells: infer product name from nearby lines around a price or
+    # quantity marker. This catches common Amazon/Walmart/SHEIN/Temu templates.
+    for i, line in enumerate(lines):
+        has_price = _price(line) > 0
+        has_qty = bool(_QTY.search(line))
+        if not has_price and not has_qty:
             continue
-        match = re.search(r'(.{3,160}?)\s+(?:USD\s*)?\$\s*([0-9][0-9,]*\.[0-9]{2})(?:\s*[x×]\s*(\d+))?\s*$', line)
-        if not match:
+        price = _price(line)
+        qty = _qty(line)
+        candidates: list[str] = []
+        for distance in (1, 2, 3):
+            before = i - distance
+            if before >= 0:
+                candidates.append(lines[before])
+        if i + 1 < len(lines):
+            candidates.append(lines[i + 1])
+        for candidate_line in candidates:
+            candidate = _clean_item_name(candidate_line)
+            if _looks_like_item_name(candidate):
+                nearby = ' '.join(lines[max(0, i - 2): min(len(lines), i + 3)])
+                add(candidate, price=price or _price(nearby), qty=max(qty, _qty(nearby)))
+                break
+
+    # Very common "2 x Product name" / "Product name x2" lines without a
+    # price. Require the explicit quantity marker to keep false positives low.
+    for line in lines:
+        match = re.match(r'(?i)^\s*(\d{1,3})\s*[x×]\s+(.+)$', line)
+        if match:
+            add(match.group(2), qty=int(match.group(1)), price=_price(line))
             continue
-        name = re.sub(r'\s+', ' ', match.group(1)).strip(' -:|•')
-        key = name.lower()
-        if len(name) < 3 or key in seen:
-            continue
-        try:
-            price = float(match.group(2).replace(',', ''))
-        except ValueError:
-            continue
-        if price <= 0:
-            continue
-        seen.add(key)
-        result.append({
-            'name': name,
-            'price': price,
-            'qty': int(match.group(3) or 1),
-            'received': False,
-        })
-        if len(result) >= 80:
-            break
-    return result
+        match = re.match(r'(?i)^(.+?)\s+[x×]\s*(\d{1,3})\s*$', line)
+        if match:
+            add(match.group(1), qty=int(match.group(2)), price=_price(line))
+
+    return [found[key] for key in order[:80]]
