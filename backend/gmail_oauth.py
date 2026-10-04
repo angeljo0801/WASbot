@@ -1,3 +1,6 @@
+import base64
+import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -19,6 +22,8 @@ PUBLIC_BASE_URL = os.getenv('PUBLIC_BASE_URL', 'https://wasbot-backend-productio
 REDIRECT_URI = os.getenv('GMAIL_REDIRECT_URI', f'{PUBLIC_BASE_URL}/api/gmail/callback').strip()
 DATA_DIR = Path(os.getenv('DATA_DIR', './data'))
 DB_PATH = DATA_DIR / 'whatsbot.db'
+STATE_TTL_SECONDS = 1800
+STATE_SECRET = os.getenv('GMAIL_STATE_SECRET', APP_API_KEY or CLIENT_SECRET or 'dev-mobile-key').encode()
 router = APIRouter()
 
 
@@ -38,10 +43,6 @@ def init_gmail_auth() -> None:
           expires_at REAL NOT NULL DEFAULT 0,
           email TEXT NOT NULL DEFAULT ''
         );
-        CREATE TABLE IF NOT EXISTS gmail_oauth_state(
-          state TEXT PRIMARY KEY,
-          created_at REAL NOT NULL
-        );
         ''')
         conn.commit()
 
@@ -52,6 +53,36 @@ init_gmail_auth()
 def require_key(value: str | None) -> None:
     if not APP_API_KEY or value != APP_API_KEY:
         raise HTTPException(status_code=401, detail='Invalid API key')
+
+
+def _b64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode().rstrip('=')
+
+
+def _b64url_decode(value: str) -> bytes:
+    padding = '=' * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value + padding)
+
+
+def create_oauth_state() -> str:
+    payload = f'{int(time.time())}.{secrets.token_urlsafe(18)}'.encode()
+    signature = hmac.new(STATE_SECRET, payload, hashlib.sha256).digest()
+    return f'{_b64url_encode(payload)}.{_b64url_encode(signature)}'
+
+
+def validate_oauth_state(value: str) -> bool:
+    try:
+        encoded_payload, encoded_signature = value.split('.', 1)
+        payload = _b64url_decode(encoded_payload)
+        signature = _b64url_decode(encoded_signature)
+        expected = hmac.new(STATE_SECRET, payload, hashlib.sha256).digest()
+        if not hmac.compare_digest(signature, expected):
+            return False
+        created_at_text, _nonce = payload.decode().split('.', 1)
+        age = time.time() - int(created_at_text)
+        return -60 <= age <= STATE_TTL_SECONDS
+    except Exception:
+        return False
 
 
 def request_json(url: str, *, method: str = 'GET', headers: dict[str, str] | None = None, form: dict[str, str] | None = None) -> dict[str, Any]:
@@ -135,11 +166,7 @@ def auth_url(x_api_key: str | None = Header(default=None)) -> dict[str, str]:
     require_key(x_api_key)
     if not CLIENT_ID or not CLIENT_SECRET:
         raise HTTPException(status_code=503, detail='Configure GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET on Railway')
-    state = secrets.token_urlsafe(24)
-    with closing(db()) as conn:
-        conn.execute('DELETE FROM gmail_oauth_state WHERE created_at < ?', (time.time() - 1800,))
-        conn.execute('INSERT INTO gmail_oauth_state(state,created_at) VALUES(?,?)', (state, time.time()))
-        conn.commit()
+    state = create_oauth_state()
     params = {
         'client_id': CLIENT_ID,
         'redirect_uri': REDIRECT_URI,
@@ -156,11 +183,7 @@ def auth_url(x_api_key: str | None = Header(default=None)) -> dict[str, str]:
 def callback(code: str = '', state: str = '', error: str = '') -> HTMLResponse:
     if error:
         return HTMLResponse('<h2>Gmail no se conectó.</h2>', status_code=400)
-    with closing(db()) as conn:
-        valid = conn.execute('SELECT 1 FROM gmail_oauth_state WHERE state=?', (state,)).fetchone()
-        conn.execute('DELETE FROM gmail_oauth_state WHERE state=?', (state,))
-        conn.commit()
-    if not valid:
+    if not validate_oauth_state(state):
         return HTMLResponse('<h2>Autorización inválida o vencida.</h2>', status_code=400)
     data = request_json('https://oauth2.googleapis.com/token', method='POST', form={
         'code': code,
