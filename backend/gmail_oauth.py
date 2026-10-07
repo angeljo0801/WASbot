@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 APP_API_KEY = os.getenv('APP_API_KEY', 'dev-mobile-key').strip()
 CLIENT_ID = os.getenv('GMAIL_CLIENT_ID', '').strip()
@@ -79,6 +79,11 @@ def init_gmail_auth() -> None:
                 now,
                 now,
             ))
+        columns = {str(row['name']) for row in conn.execute('PRAGMA table_info(gmail_accounts)').fetchall()}
+        if 'client_id' not in columns:
+            conn.execute("ALTER TABLE gmail_accounts ADD COLUMN client_id TEXT NOT NULL DEFAULT ''")
+        if 'client_name' not in columns:
+            conn.execute("ALTER TABLE gmail_accounts ADD COLUMN client_name TEXT NOT NULL DEFAULT ''")
         conn.commit()
 
 
@@ -99,11 +104,18 @@ def _b64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + padding)
 
 
-def create_oauth_state(account_id: int | None = None) -> str:
+def create_oauth_state(
+    account_id: int | None = None,
+    *,
+    client_id: str = '',
+    client_name: str = '',
+) -> str:
     payload = json.dumps({
         'ts': int(time.time()),
         'nonce': secrets.token_urlsafe(18),
         'account_id': account_id,
+        'client_id': client_id.strip(),
+        'client_name': client_name.strip()[:160],
     }, separators=(',', ':')).encode()
     signature = hmac.new(STATE_SECRET, payload, hashlib.sha256).digest()
     return f'{_b64url_encode(payload)}.{_b64url_encode(signature)}'
@@ -177,13 +189,24 @@ def _public_account(row: sqlite3.Row) -> dict[str, Any]:
         'enabled': bool(row['enabled']),
         'primary': bool(row['is_primary']),
         'connected': bool(row['refresh_token'] or row['access_token']),
+        'clientId': str(row['client_id'] or '') if 'client_id' in row.keys() else '',
+        'clientName': str(row['client_name'] or '') if 'client_name' in row.keys() else '',
     }
 
 
-def save_tokens(data: dict[str, Any], email: str = '', account_id: int | None = None) -> int:
+def save_tokens(
+    data: dict[str, Any],
+    email: str = '',
+    account_id: int | None = None,
+    *,
+    client_id: str = '',
+    client_name: str = '',
+) -> int:
     access = str(data.get('access_token') or '')
     expires = time.time() + max(60, int(data.get('expires_in') or 3600) - 60)
     email = email.strip()
+    client_id = client_id.strip()
+    client_name = client_name.strip()[:160]
     now = time.time()
 
     with closing(db()) as conn:
@@ -204,9 +227,13 @@ def save_tokens(data: dict[str, Any], email: str = '', account_id: int | None = 
             refresh = str(data.get('refresh_token') or '')
             cur = conn.execute('''
             INSERT INTO gmail_accounts(
-              email,access_token,refresh_token,expires_at,enabled,is_primary,created_at,updated_at
-            ) VALUES(?,?,?,?,1,?,?,?)
-            ''', (email, access, refresh, expires, 1 if count == 0 else 0, now, now))
+              email,access_token,refresh_token,expires_at,enabled,is_primary,created_at,updated_at,
+              client_id,client_name
+            ) VALUES(?,?,?,?,1,?,?,?,?,?)
+            ''', (
+                email, access, refresh, expires, 1 if count == 0 else 0, now, now,
+                client_id, client_name,
+            ))
             saved_id = int(cur.lastrowid)
         else:
             saved_id = int(target['id'])
@@ -218,9 +245,14 @@ def save_tokens(data: dict[str, Any], email: str = '', account_id: int | None = 
               refresh_token=?,
               expires_at=?,
               enabled=1,
-              updated_at=?
+              updated_at=?,
+              client_id=CASE WHEN ?!='' THEN ? ELSE client_id END,
+              client_name=CASE WHEN ?!='' THEN ? ELSE client_name END
             WHERE id=?
-            ''', (email, email, access, refresh, expires, now, saved_id))
+            ''', (
+                email, email, access, refresh, expires, now,
+                client_id, client_id, client_name, client_name, saved_id,
+            ))
 
         # Guarantee exactly one primary account whenever at least one exists.
         primary_count = int(conn.execute('SELECT COUNT(*) FROM gmail_accounts WHERE is_primary=1').fetchone()[0])
@@ -277,9 +309,18 @@ def access_token() -> str:
     return access_token_for_account(int(rows[0]['id']))
 
 
-def active_account_tokens() -> list[tuple[int, str, str]]:
+def active_account_tokens(client_id: str = '') -> list[tuple[int, str, str]]:
+    rows = accounts_rows(enabled_only=True)
+    client_id = client_id.strip()
+    if client_id:
+        linked = [
+            row for row in rows
+            if str(row['client_id'] or '').strip() == client_id
+        ]
+        if linked:
+            rows = linked
     out: list[tuple[int, str, str]] = []
-    for row in accounts_rows(enabled_only=True):
+    for row in rows:
         if not (row['refresh_token'] or row['access_token']):
             continue
         account_id = int(row['id'])
@@ -319,6 +360,50 @@ def gmail_accounts(x_api_key: str | None = Header(default=None)) -> dict[str, An
         'redirectUri': REDIRECT_URI,
         'accounts': [_public_account(r) for r in rows],
     }
+
+
+@router.post('/api/gmail/client-invite')
+def create_client_invite(
+    client_id: str = Query(...),
+    client_name: str = Query(default=''),
+    x_api_key: str | None = Header(default=None),
+) -> dict[str, str]:
+    require_key(x_api_key)
+    clean_id = client_id.strip()
+    if not clean_id:
+        raise HTTPException(status_code=422, detail='client_id is required')
+    state = create_oauth_state(
+        None,
+        client_id=clean_id,
+        client_name=client_name,
+    )
+    return {
+        'url': f'{PUBLIC_BASE_URL}/api/gmail/client-connect?invite={urllib.parse.quote(state)}',
+        'expiresInSeconds': str(STATE_TTL_SECONDS),
+    }
+
+
+@router.get('/api/gmail/client-connect')
+def client_connect(invite: str = Query(...)) -> RedirectResponse:
+    state_data = decode_oauth_state(invite)
+    if state_data is None or not str(state_data.get('client_id') or '').strip():
+        raise HTTPException(status_code=400, detail='Invitation is invalid or expired')
+    if not CLIENT_ID or not CLIENT_SECRET:
+        raise HTTPException(status_code=503, detail='Gmail OAuth is not configured')
+    params = {
+        'client_id': CLIENT_ID,
+        'redirect_uri': REDIRECT_URI,
+        'response_type': 'code',
+        'scope': 'openid email https://www.googleapis.com/auth/gmail.readonly',
+        'access_type': 'offline',
+        'include_granted_scopes': 'true',
+        'prompt': 'consent select_account',
+        'state': invite,
+    }
+    return RedirectResponse(
+        'https://accounts.google.com/o/oauth2/v2/auth?' + urllib.parse.urlencode(params),
+        status_code=302,
+    )
 
 
 @router.get('/api/gmail/auth-url')
@@ -423,10 +508,26 @@ def callback(code: str = '', state: str = '', error: str = '') -> HTMLResponse:
             pass
     raw_id = state_data.get('account_id')
     account_id = int(raw_id) if raw_id not in (None, '') else None
-    saved_id = save_tokens(data, email, account_id)
+    client_id = str(state_data.get('client_id') or '').strip()
+    client_name = str(state_data.get('client_name') or '').strip()
+    saved_id = save_tokens(
+        data,
+        email,
+        account_id,
+        client_id=client_id,
+        client_name=client_name,
+    )
     label = email or f'Cuenta #{saved_id}'
+    owner = (
+        f'<p>Vinculado a: <strong>{client_name}</strong></p>'
+        if client_name else ''
+    )
     return HTMLResponse(
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<div style="font-family:Arial,sans-serif;max-width:560px;margin:48px auto;padding:24px">'
         '<h2>Gmail conectado con Paquetería.</h2>'
         f'<p>{label}</p>'
-        '<p>Ya puedes volver a la app y tocar Actualizar.</p>'
+        f'{owner}'
+        '<p>Ya puedes cerrar esta página. La cuenta quedó autorizada para buscar compras y tracking.</p>'
+        '</div>'
     )
