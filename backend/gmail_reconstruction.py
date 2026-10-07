@@ -1,13 +1,19 @@
 import base64
+import hashlib
+import io
 import json
 import os
+import threading
 import urllib.parse
+import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query
+from PIL import Image
 from fastapi.responses import FileResponse
 
 from gmail_oauth import active_account_tokens, require_key, request_json
@@ -28,6 +34,10 @@ from gmail_parser import (
 DATA_DIR = Path(os.getenv('DATA_DIR', './data'))
 MEDIA_DIR = DATA_DIR / 'gmail_media'
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+JOB_DIR = DATA_DIR / 'gmail_jobs'
+JOB_DIR.mkdir(parents=True, exist_ok=True)
+JOB_EXECUTOR = ThreadPoolExecutor(max_workers=max(2, int(os.getenv('GMAIL_JOB_WORKERS', '3'))))
+JOB_LOCK = threading.Lock()
 router = APIRouter()
 
 
@@ -68,6 +78,197 @@ def save_image(data: bytes, account_id: int, message_id: str, suffix: str, mime:
     if not path.exists():
         path.write_bytes(data)
     return {'name': name, 'url': f'/api/gmail/media/{name}', 'accountId': account_id}
+
+
+
+def _job_path(job_id: str) -> Path:
+    safe = ''.join(ch for ch in job_id if ch.isalnum() or ch in {'-', '_'})[:96]
+    return JOB_DIR / f'{safe}.json'
+
+
+def _write_job(job_id: str, value: dict[str, Any]) -> None:
+    path = _job_path(job_id)
+    tmp = path.with_suffix('.tmp')
+    payload = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+    with JOB_LOCK:
+        tmp.write_text(payload, encoding='utf-8')
+        tmp.replace(path)
+
+
+def _read_job(job_id: str) -> dict[str, Any] | None:
+    path = _job_path(job_id)
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding='utf-8'))
+        return value if isinstance(value, dict) else None
+    except Exception:
+        return None
+
+
+def _media_extension(content_type: str, url: str) -> str:
+    lower = f'{content_type} {url}'.lower()
+    if 'png' in lower:
+        return 'png'
+    if 'webp' in lower:
+        return 'webp'
+    if 'gif' in lower:
+        return 'gif'
+    return 'jpg'
+
+
+def _thumbnail_for(path: Path, digest: str) -> str:
+    thumb_name = f'thumb_{digest}.jpg'
+    thumb_path = MEDIA_DIR / thumb_name
+    if thumb_path.exists() and thumb_path.stat().st_size > 0:
+        return f'/api/gmail/media/{thumb_name}'
+    try:
+        with Image.open(path) as image:
+            image = image.convert('RGB')
+            image.thumbnail((480, 480))
+            image.save(thumb_path, format='JPEG', quality=64, optimize=True)
+        return f'/api/gmail/media/{thumb_name}'
+    except Exception:
+        return ''
+
+
+def _cache_remote_image(url: str) -> dict[str, Any]:
+    # Railway downloads each remote email image once. The phone can then use a
+    # small thumbnail for OCR/filtering and fetch the original only if accepted.
+    digest = hashlib.sha256(url.encode('utf-8', errors='ignore')).hexdigest()[:28]
+    existing = next(MEDIA_DIR.glob(f'cache_{digest}.*'), None)
+    if existing and existing.is_file() and existing.stat().st_size > 0:
+        return {
+            'url': f'/api/gmail/media/{existing.name}',
+            'thumbnailUrl': _thumbnail_for(existing, digest),
+            'originalUrl': url,
+        }
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            'User-Agent': 'Mozilla/5.0 (Android) Paqueteria/1.0',
+            'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        },
+    )
+    with urllib.request.urlopen(request, timeout=18) as response:
+        content_type = str(response.headers.get('Content-Type') or '')
+        data = response.read(12 * 1024 * 1024 + 1)
+    if not data or len(data) > 12 * 1024 * 1024:
+        raise ValueError('remote image unavailable or too large')
+    ext = _media_extension(content_type, url)
+    name = f'cache_{digest}.{ext}'
+    path = MEDIA_DIR / name
+    if not path.exists():
+        path.write_bytes(data)
+    return {
+        'url': f'/api/gmail/media/{name}',
+        'thumbnailUrl': _thumbnail_for(path, digest),
+        'originalUrl': url,
+    }
+
+
+def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    # Cache remote HTML images on Railway. Failure is non-fatal: the phone can
+    # still use the original URL.
+    for raw in list(result.get('emailPhotoUrls') or [])[:60]:
+        url = str(raw or '').strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        row: dict[str, Any] = {
+            'kind': 'remote',
+            'url': url,
+            'originalUrl': url,
+            'thumbnailUrl': '',
+        }
+        try:
+            row.update(_cache_remote_image(url))
+        except Exception:
+            pass
+        candidates.append(row)
+
+    # Gmail MIME attachments are already stored on Railway. Generate a compact
+    # thumbnail but keep the original protected media URL for final caching.
+    for raw in list(result.get('emailAttachmentImages') or [])[:60]:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        url = str(row.get('url') or '').strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        row['kind'] = 'attachment'
+        row['originalUrl'] = url
+        name = Path(str(row.get('name') or Path(url).name)).name
+        path = MEDIA_DIR / name
+        if path.exists() and path.is_file():
+            digest = hashlib.sha256(path.read_bytes()[:262144]).hexdigest()[:28]
+            row['thumbnailUrl'] = _thumbnail_for(path, digest)
+        else:
+            row['thumbnailUrl'] = ''
+        candidates.append(row)
+
+    return candidates
+
+
+def _run_reconstruction_job(job_id: str, order: str, tracking: str) -> None:
+    started = datetime.now(timezone.utc).isoformat()
+    _write_job(job_id, {
+        'jobId': job_id,
+        'status': 'running',
+        'orderNumber': order,
+        'tracking': tracking,
+        'startedAt': started,
+        'updatedAt': started,
+    })
+    try:
+        result = reconstruct(order, tracking)
+        result['emailPhotoCandidates'] = _prepare_media_candidates(result)
+        completed = datetime.now(timezone.utc).isoformat()
+        _write_job(job_id, {
+            'jobId': job_id,
+            'status': 'completed',
+            'orderNumber': order,
+            'tracking': tracking,
+            'startedAt': started,
+            'completedAt': completed,
+            'updatedAt': completed,
+            'result': result,
+        })
+    except Exception as exc:
+        completed = datetime.now(timezone.utc).isoformat()
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        _write_job(job_id, {
+            'jobId': job_id,
+            'status': 'failed',
+            'orderNumber': order,
+            'tracking': tracking,
+            'startedAt': started,
+            'completedAt': completed,
+            'updatedAt': completed,
+            'error': str(detail),
+        })
+
+
+def _ensure_job(job_id: str, order: str, tracking: str) -> dict[str, Any]:
+    existing = _read_job(job_id)
+    if existing and existing.get('status') in {'queued', 'running', 'completed'}:
+        return existing
+    queued = {
+        'jobId': job_id,
+        'status': 'queued',
+        'orderNumber': order,
+        'tracking': tracking,
+        'createdAt': datetime.now(timezone.utc).isoformat(),
+        'updatedAt': datetime.now(timezone.utc).isoformat(),
+    }
+    _write_job(job_id, queued)
+    JOB_EXECUTOR.submit(_run_reconstruction_job, job_id, order, tracking)
+    return queued
 
 
 def walk_parts(
@@ -282,6 +483,58 @@ def reconstruct(order: str = '', tracking: str = '') -> dict[str, Any]:
         'accountErrors': account_errors,
         'syncedAt': datetime.now(timezone.utc).isoformat(),
     }
+
+
+@router.post('/api/gmail/reconstruct/jobs')
+def api_start_reconstruction_job(
+    order_number: str = Query(default=''),
+    tracking: str = Query(default=''),
+    client_token: str = Query(default=''),
+    x_api_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    require_key(x_api_key)
+    order = order_number.strip()
+    track = tracking.strip()
+    if not order and not track:
+        raise HTTPException(status_code=422, detail='Provide order_number or tracking')
+    if client_token.strip():
+        job_id = 'c_' + hashlib.sha256(client_token.strip().encode('utf-8')).hexdigest()[:32]
+    else:
+        job_id = uuid.uuid4().hex
+    job = _ensure_job(job_id, order, track)
+    return {
+        'jobId': job_id,
+        'status': str(job.get('status') or 'queued'),
+        'createdAt': job.get('createdAt') or job.get('startedAt') or '',
+    }
+
+
+@router.get('/api/gmail/reconstruct/jobs/{job_id}')
+def api_get_reconstruction_job(
+    job_id: str,
+    x_api_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    require_key(x_api_key)
+    job = _read_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail='Gmail reconstruction job not found')
+    # If Railway restarted while a queued/running job was in memory, resume it
+    # automatically from its durable descriptor.
+    if job.get('status') in {'queued', 'running'}:
+        updated = str(job.get('updatedAt') or job.get('startedAt') or '')
+        try:
+            then = datetime.fromisoformat(updated.replace('Z', '+00:00'))
+            age = (datetime.now(timezone.utc) - then).total_seconds()
+        except Exception:
+            age = 999
+        if age > 120:
+            JOB_EXECUTOR.submit(
+                _run_reconstruction_job,
+                job_id,
+                str(job.get('orderNumber') or ''),
+                str(job.get('tracking') or ''),
+            )
+    return job
 
 
 @router.get('/api/gmail/reconstruct')
