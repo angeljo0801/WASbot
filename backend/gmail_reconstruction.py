@@ -276,18 +276,19 @@ def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
     return candidates
 
 
-def _run_reconstruction_job(job_id: str, order: str, tracking: str) -> None:
+def _run_reconstruction_job(job_id: str, order: str, tracking: str, client_id: str = '') -> None:
     started = datetime.now(timezone.utc).isoformat()
     _write_job(job_id, {
         'jobId': job_id,
         'status': 'running',
         'orderNumber': order,
         'tracking': tracking,
+        'clientId': client_id,
         'startedAt': started,
         'updatedAt': started,
     })
     try:
-        result = reconstruct(order, tracking)
+        result = reconstruct(order, tracking, client_id)
         result['emailPhotoCandidates'] = _prepare_media_candidates(result)
         completed = datetime.now(timezone.utc).isoformat()
         _write_job(job_id, {
@@ -295,6 +296,7 @@ def _run_reconstruction_job(job_id: str, order: str, tracking: str) -> None:
             'status': 'completed',
             'orderNumber': order,
             'tracking': tracking,
+            'clientId': client_id,
             'startedAt': started,
             'completedAt': completed,
             'updatedAt': completed,
@@ -308,6 +310,7 @@ def _run_reconstruction_job(job_id: str, order: str, tracking: str) -> None:
             'status': 'failed',
             'orderNumber': order,
             'tracking': tracking,
+            'clientId': client_id,
             'startedAt': started,
             'completedAt': completed,
             'updatedAt': completed,
@@ -315,7 +318,7 @@ def _run_reconstruction_job(job_id: str, order: str, tracking: str) -> None:
         })
 
 
-def _ensure_job(job_id: str, order: str, tracking: str) -> dict[str, Any]:
+def _ensure_job(job_id: str, order: str, tracking: str, client_id: str = '') -> dict[str, Any]:
     existing = _read_job(job_id)
     if existing and existing.get('status') in {'queued', 'running', 'completed'}:
         return existing
@@ -324,11 +327,12 @@ def _ensure_job(job_id: str, order: str, tracking: str) -> dict[str, Any]:
         'status': 'queued',
         'orderNumber': order,
         'tracking': tracking,
+        'clientId': client_id,
         'createdAt': datetime.now(timezone.utc).isoformat(),
         'updatedAt': datetime.now(timezone.utc).isoformat(),
     }
     _write_job(job_id, queued)
-    JOB_EXECUTOR.submit(_run_reconstruction_job, job_id, order, tracking)
+    JOB_EXECUTOR.submit(_run_reconstruction_job, job_id, order, tracking, client_id)
     return queued
 
 
@@ -466,12 +470,12 @@ def search_account(account_id: int, source_email: str, token: str, seed: str) ->
     return records
 
 
-def reconstruct(order: str = '', tracking: str = '') -> dict[str, Any]:
+def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dict[str, Any]:
     seed = order.strip() or tracking.strip()
     if not seed:
         raise HTTPException(status_code=422, detail='Provide order_number or tracking')
 
-    accounts = active_account_tokens()
+    accounts = active_account_tokens(client_id)
     if not accounts:
         raise HTTPException(status_code=409, detail='No enabled Gmail accounts are connected')
 
@@ -528,6 +532,7 @@ def reconstruct(order: str = '', tracking: str = '') -> dict[str, Any]:
     return {
         'found': bool(records),
         'query': seed,
+        'clientId': client_id.strip(),
         'store': store_name(records),
         'orderNumber': order_number(combined, order),
         'trackingNumbers': tracks,
@@ -564,6 +569,7 @@ def api_start_reconstruction_job(
     order_number: str = Query(default=''),
     tracking: str = Query(default=''),
     client_token: str = Query(default=''),
+    client_id: str = Query(default=''),
     x_api_key: str | None = Header(default=None),
 ) -> dict[str, Any]:
     require_key(x_api_key)
@@ -575,7 +581,7 @@ def api_start_reconstruction_job(
         job_id = 'c_' + hashlib.sha256(client_token.strip().encode('utf-8')).hexdigest()[:32]
     else:
         job_id = uuid.uuid4().hex
-    job = _ensure_job(job_id, order, track)
+    job = _ensure_job(job_id, order, track, client_id.strip())
     return {
         'jobId': job_id,
         'status': str(job.get('status') or 'queued'),
@@ -607,6 +613,7 @@ def api_get_reconstruction_job(
                 job_id,
                 str(job.get('orderNumber') or ''),
                 str(job.get('tracking') or ''),
+                str(job.get('clientId') or ''),
             )
     return job
 
@@ -615,10 +622,11 @@ def api_get_reconstruction_job(
 def api_reconstruct(
     order_number: str = Query(default=''),
     tracking: str = Query(default=''),
+    client_id: str = Query(default=''),
     x_api_key: str | None = Header(default=None),
 ) -> dict[str, Any]:
     require_key(x_api_key)
-    return reconstruct(order_number, tracking)
+    return reconstruct(order_number, tracking, client_id)
 
 
 @router.get('/api/gmail/media/{name}')
