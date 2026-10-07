@@ -132,16 +132,37 @@ def _thumbnail_for(path: Path, digest: str) -> str:
         return ''
 
 
+def _obvious_nonproduct_url(url: str) -> bool:
+    lower = urllib.parse.unquote(url).lower()
+    obvious = (
+        '1x1', 'spacer', 'tracking-pixel', 'tracking_pixel', '/pixel',
+        'open.gif', 'beacon', 'facebook', 'instagram', 'twitter',
+        'youtube', 'google-play', 'googleplay', 'app-store', 'appstore',
+    )
+    return any(token in lower for token in obvious)
+
+
+def _image_dimensions(path: Path) -> tuple[int, int]:
+    try:
+        with Image.open(path) as image:
+            return int(image.width or 0), int(image.height or 0)
+    except Exception:
+        return 0, 0
+
+
 def _cache_remote_image(url: str) -> dict[str, Any]:
     # Railway downloads each remote email image once. The phone can then use a
     # small thumbnail for OCR/filtering and fetch the original only if accepted.
     digest = hashlib.sha256(url.encode('utf-8', errors='ignore')).hexdigest()[:28]
     existing = next(MEDIA_DIR.glob(f'cache_{digest}.*'), None)
     if existing and existing.is_file() and existing.stat().st_size > 0:
+        width, height = _image_dimensions(existing)
         return {
             'url': f'/api/gmail/media/{existing.name}',
             'thumbnailUrl': _thumbnail_for(existing, digest),
             'originalUrl': url,
+            'width': width,
+            'height': height,
         }
 
     request = urllib.request.Request(
@@ -151,7 +172,7 @@ def _cache_remote_image(url: str) -> dict[str, Any]:
             'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
         },
     )
-    with urllib.request.urlopen(request, timeout=18) as response:
+    with urllib.request.urlopen(request, timeout=7) as response:
         content_type = str(response.headers.get('Content-Type') or '')
         data = response.read(12 * 1024 * 1024 + 1)
     if not data or len(data) > 12 * 1024 * 1024:
@@ -161,39 +182,69 @@ def _cache_remote_image(url: str) -> dict[str, Any]:
     path = MEDIA_DIR / name
     if not path.exists():
         path.write_bytes(data)
+    width, height = _image_dimensions(path)
     return {
         'url': f'/api/gmail/media/{name}',
         'thumbnailUrl': _thumbnail_for(path, digest),
         'originalUrl': url,
+        'width': width,
+        'height': height,
     }
 
 
 def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
+    # Keep the phone fast: eliminate unmistakable tracking/social assets before
+    # any download, then prepare the remaining remote images concurrently.
+    remote_urls: list[str] = []
     seen: set[str] = set()
-
-    # Cache remote HTML images on Railway. Failure is non-fatal: the phone can
-    # still use the original URL.
-    for raw in list(result.get('emailPhotoUrls') or [])[:60]:
+    for raw in list(result.get('emailPhotoUrls') or []):
         url = str(raw or '').strip()
-        if not url or url in seen:
+        if not url or url in seen or _obvious_nonproduct_url(url):
             continue
         seen.add(url)
-        row: dict[str, Any] = {
-            'kind': 'remote',
-            'url': url,
-            'originalUrl': url,
-            'thumbnailUrl': '',
-        }
-        try:
-            row.update(_cache_remote_image(url))
-        except Exception:
-            pass
-        candidates.append(row)
+        remote_urls.append(url)
+        if len(remote_urls) >= 40:
+            break
 
-    # Gmail MIME attachments are already stored on Railway. Generate a compact
-    # thumbnail but keep the original protected media URL for final caching.
-    for raw in list(result.get('emailAttachmentImages') or [])[:60]:
+    remote_rows: list[dict[str, Any]] = []
+    workers = max(1, min(10, len(remote_urls)))
+    if remote_urls:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_cache_remote_image, url): url for url in remote_urls}
+            prepared_by_url: dict[str, dict[str, Any]] = {}
+            for future in as_completed(futures):
+                url = futures[future]
+                row: dict[str, Any] = {
+                    'kind': 'remote',
+                    'url': url,
+                    'originalUrl': url,
+                    'thumbnailUrl': '',
+                }
+                try:
+                    row.update(future.result())
+                except Exception:
+                    # A slow/broken CDN image must never block the reconstruction.
+                    pass
+                prepared_by_url[url] = row
+            # Preserve Gmail order even though downloads completed in parallel.
+            remote_rows = [prepared_by_url[url] for url in remote_urls if url in prepared_by_url]
+
+    candidates: list[dict[str, Any]] = []
+    for row in remote_rows:
+        width = int(row.get('width') or 0)
+        height = int(row.get('height') or 0)
+        if width and height:
+            shortest = min(width, height)
+            longest = max(width, height)
+            if shortest < 70 or (shortest > 0 and longest / shortest > 6.5):
+                continue
+        candidates.append(row)
+        if len(candidates) >= 20:
+            break
+
+    # Gmail MIME attachments are already local on Railway, so thumbnailing them
+    # is cheap and they are kept ahead of the final cap when useful.
+    for raw in list(result.get('emailAttachmentImages') or [])[:20]:
         if not isinstance(raw, dict):
             continue
         row = dict(raw)
@@ -206,11 +257,21 @@ def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
         name = Path(str(row.get('name') or Path(url).name)).name
         path = MEDIA_DIR / name
         if path.exists() and path.is_file():
+            width, height = _image_dimensions(path)
+            if width and height:
+                shortest = min(width, height)
+                longest = max(width, height)
+                if shortest < 70 or (shortest > 0 and longest / shortest > 6.5):
+                    continue
             digest = hashlib.sha256(path.read_bytes()[:262144]).hexdigest()[:28]
             row['thumbnailUrl'] = _thumbnail_for(path, digest)
+            row['width'] = width
+            row['height'] = height
         else:
             row['thumbnailUrl'] = ''
         candidates.append(row)
+        if len(candidates) >= 24:
+            break
 
     return candidates
 
@@ -377,18 +438,31 @@ def recompact(value: str) -> str:
 
 def search_account(account_id: int, source_email: str, token: str, seed: str) -> list[dict[str, Any]]:
     safe_seed = seed.replace('"', '')
-    query = urllib.parse.urlencode({'q': f'"{safe_seed}"', 'maxResults': '25'})
+    query = urllib.parse.urlencode({'q': f'"{safe_seed}"', 'maxResults': '15'})
     listing = gmail_json('messages?' + query, token)
-    records: list[dict[str, Any]] = []
-    for item in listing.get('messages') or []:
-        message_id = str(item.get('id') or '')
-        if not message_id:
-            continue
+    message_ids = [
+        str(item.get('id') or '')
+        for item in (listing.get('messages') or [])
+        if str(item.get('id') or '')
+    ][:15]
+    if not message_ids:
+        return []
+
+    def fetch_one(message_id: str) -> dict[str, Any] | None:
         try:
             full = gmail_json(f'messages/{urllib.parse.quote(message_id)}?format=full', token)
-            records.append(record(full, token, account_id, source_email))
+            return record(full, token, account_id, source_email)
         except Exception:
-            continue
+            return None
+
+    records: list[dict[str, Any]] = []
+    workers = max(1, min(8, len(message_ids)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(fetch_one, message_id) for message_id in message_ids]
+        for future in as_completed(futures):
+            row = future.result()
+            if row:
+                records.append(row)
     return records
 
 
@@ -440,7 +514,7 @@ def reconstruct(order: str = '', tracking: str = '') -> dict[str, Any]:
     urls: list[str] = []
     attachments: list[dict[str, Any]] = []
     source_emails: list[str] = []
-    for row in records:
+    for row in reversed(records):
         source_email = str(row.get('sourceEmail') or '')
         if source_email and source_email not in source_emails:
             source_emails.append(source_email)
