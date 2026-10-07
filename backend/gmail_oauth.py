@@ -1,3 +1,4 @@
+import html
 import base64
 import hashlib
 import hmac
@@ -23,6 +24,7 @@ REDIRECT_URI = os.getenv('GMAIL_REDIRECT_URI', f'{PUBLIC_BASE_URL}/api/gmail/cal
 DATA_DIR = Path(os.getenv('DATA_DIR', './data'))
 DB_PATH = DATA_DIR / 'whatsbot.db'
 STATE_TTL_SECONDS = 1800
+CLIENT_INVITE_TTL_SECONDS = 7 * 24 * 60 * 60
 STATE_SECRET = os.getenv('GMAIL_STATE_SECRET', APP_API_KEY or CLIENT_SECRET or 'dev-mobile-key').encode()
 router = APIRouter()
 
@@ -109,6 +111,7 @@ def create_oauth_state(
     *,
     client_id: str = '',
     client_name: str = '',
+    ttl_seconds: int = STATE_TTL_SECONDS,
 ) -> str:
     payload = json.dumps({
         'ts': int(time.time()),
@@ -116,6 +119,7 @@ def create_oauth_state(
         'account_id': account_id,
         'client_id': client_id.strip(),
         'client_name': client_name.strip()[:160],
+        'ttl': max(300, min(int(ttl_seconds), CLIENT_INVITE_TTL_SECONDS)),
     }, separators=(',', ':')).encode()
     signature = hmac.new(STATE_SECRET, payload, hashlib.sha256).digest()
     return f'{_b64url_encode(payload)}.{_b64url_encode(signature)}'
@@ -131,7 +135,8 @@ def decode_oauth_state(value: str) -> dict[str, Any] | None:
             return None
         parsed = json.loads(payload.decode())
         age = time.time() - int(parsed.get('ts') or 0)
-        if not (-60 <= age <= STATE_TTL_SECONDS):
+        ttl = max(300, min(int(parsed.get('ttl') or STATE_TTL_SECONDS), CLIENT_INVITE_TTL_SECONDS))
+        if not (-60 <= age <= ttl):
             return None
         return parsed
     except Exception:
@@ -376,10 +381,11 @@ def create_client_invite(
         None,
         client_id=clean_id,
         client_name=client_name,
+        ttl_seconds=CLIENT_INVITE_TTL_SECONDS,
     )
     return {
         'url': f'{PUBLIC_BASE_URL}/api/gmail/client-connect?invite={urllib.parse.quote(state)}',
-        'expiresInSeconds': str(STATE_TTL_SECONDS),
+        'expiresInSeconds': str(CLIENT_INVITE_TTL_SECONDS),
     }
 
 
@@ -517,9 +523,10 @@ def callback(code: str = '', state: str = '', error: str = '') -> HTMLResponse:
         client_id=client_id,
         client_name=client_name,
     )
-    label = email or f'Cuenta #{saved_id}'
+    label = html.escape(email or f'Cuenta #{saved_id}')
+    safe_client_name = html.escape(client_name)
     owner = (
-        f'<p>Vinculado a: <strong>{client_name}</strong></p>'
+        f'<p>Vinculado a: <strong>{safe_client_name}</strong></p>'
         if client_name else ''
     )
     return HTMLResponse(
