@@ -42,6 +42,8 @@ JOB_DIR = DATA_DIR / 'gmail_jobs'
 JOB_DIR.mkdir(parents=True, exist_ok=True)
 JOB_EXECUTOR = ThreadPoolExecutor(max_workers=max(2, int(os.getenv('GMAIL_JOB_WORKERS', '3'))))
 JOB_LOCK = threading.Lock()
+JOB_FUTURES_LOCK = threading.Lock()
+ACTIVE_JOB_FUTURES: dict[str, Any] = {}
 GMAIL_SEARCH_BUDGET_SECONDS = 85
 GMAIL_SEARCH_MAX_MESSAGES = 100
 router = APIRouter()
@@ -332,6 +334,21 @@ def _run_reconstruction_job(job_id: str, order: str, tracking: str, client_id: s
         })
 
 
+def _submit_job_once(job_id: str, order: str, tracking: str, client_id: str) -> None:
+    """Prevent a running job from being submitted again on repeated polls."""
+    with JOB_FUTURES_LOCK:
+        future = ACTIVE_JOB_FUTURES.get(job_id)
+        if future is not None and not future.done():
+            return
+        # Keep only pending jobs; done futures do not need to stay in memory.
+        for previous, active in list(ACTIVE_JOB_FUTURES.items()):
+            if active.done():
+                ACTIVE_JOB_FUTURES.pop(previous, None)
+        ACTIVE_JOB_FUTURES[job_id] = JOB_EXECUTOR.submit(
+            _run_reconstruction_job, job_id, order, tracking, client_id,
+        )
+
+
 def _ensure_job(job_id: str, order: str, tracking: str, client_id: str = '') -> dict[str, Any]:
     existing = _read_job(job_id)
     # Re-posting the same token must not launch the same failed job again.
@@ -348,7 +365,7 @@ def _ensure_job(job_id: str, order: str, tracking: str, client_id: str = '') -> 
         'updatedAt': datetime.now(timezone.utc).isoformat(),
     }
     _write_job(job_id, queued)
-    JOB_EXECUTOR.submit(_run_reconstruction_job, job_id, order, tracking, client_id)
+    _submit_job_once(job_id, order, tracking, client_id)
     return queued
 
 
@@ -780,8 +797,7 @@ def api_get_reconstruction_job(
         except Exception:
             age = 999
         if age > 120:
-            JOB_EXECUTOR.submit(
-                _run_reconstruction_job,
+            _submit_job_once(
                 job_id,
                 str(job.get('orderNumber') or ''),
                 str(job.get('tracking') or ''),
