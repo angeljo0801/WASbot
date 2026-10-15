@@ -469,7 +469,9 @@ def _gmail_search_queries(seed: str) -> list[tuple[str, bool]]:
     """Exact tracking first; fallbacks must verify the full tracking locally."""
     clean = seed.strip().strip('"')
     compact = _compact_identifier(clean)
-    queries: list[tuple[str, bool]] = [(f'"{clean}"', False)]
+    # Even Gmail's indexed hits must match the actual decoded message, not
+    # just a quoted code appearing in an unrelated notification.
+    queries: list[tuple[str, bool]] = [(f'"{clean}"', len(compact) >= 8)]
     if compact != clean.upper():
         queries.append((compact, True))
     else:
