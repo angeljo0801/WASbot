@@ -315,30 +315,79 @@ def access_token() -> str:
 
 
 def active_account_tokens(client_id: str = '') -> list[tuple[int, str, str]]:
+    """Return only authorized accounts in scope; preserve actionable OAuth errors."""
     rows = accounts_rows(enabled_only=True)
     client_id = client_id.strip()
     if client_id:
-        # Packages may be associated with a customer's Gmail, but the business
-        # owner often receives the Temu/GOFO tracking in the shared company
-        # inbox. Search that unassigned inbox as well, without opening another
-        # customer's private linked account.
-        scoped = [
+        # The business's unassigned inbox is shared. A Gmail inbox linked to
+        # another customer must remain private.
+        rows = [
             row for row in rows
             if str(row['client_id'] or '').strip() in ('', client_id)
         ]
-        rows = scoped
+
+    if not rows:
+        raise HTTPException(
+            status_code=409,
+            detail=('No hay cuentas Gmail habilitadas para esta búsqueda. '
+                    'Revisa Correos conectados y la cuenta asociada al cliente.'),
+        )
+
     out: list[tuple[int, str, str]] = []
+    expired_or_revoked = 0
+    missing_authorization = 0
+    network_or_config_error = 0
     for row in rows:
         if not (row['refresh_token'] or row['access_token']):
+            missing_authorization += 1
             continue
         account_id = int(row['id'])
         try:
             token = access_token_for_account(account_id)
-        except HTTPException:
+        except HTTPException as exc:
+            reason = str(exc.detail).lower()
+            # Sanitize all provider errors; do not log tokens, addresses or
+            # raw Google OAuth response bodies.
+            if any(k in reason for k in (
+                'invalid_grant', 'invalid_token', 'token has been expired',
+                'reconnect gmail', 'unauthorized_client', 'revoked',
+            )):
+                expired_or_revoked += 1
+            else:
+                network_or_config_error += 1
             continue
         if token:
             out.append((account_id, str(row['email'] or ''), token))
-    return out
+        else:
+            network_or_config_error += 1
+
+    if out:
+        return out
+
+    if expired_or_revoked:
+        raise HTTPException(
+            status_code=401,
+            detail=('La autorización de Gmail ha caducado o ha sido revocada. '
+                    'Abre Correos conectados y pulsa Volver a autorizar '
+                    'para renovar el acceso a Gmail.'),
+        )
+    if network_or_config_error:
+        raise HTTPException(
+            status_code=503,
+            detail=('Google no permitió renovar el acceso a Gmail. '
+                    'Revisa la configuración OAuth y la conexión del servidor; '
+                    'si continúa, vuelve a autorizar la cuenta.'),
+        )
+    if missing_authorization:
+        raise HTTPException(
+            status_code=409,
+            detail=('Las cuentas Gmail de esta búsqueda están pendientes '
+                    'de autorización. Abre Correos conectados para conectarlas.'),
+        )
+    raise HTTPException(
+        status_code=409,
+        detail='No existe una cuenta Gmail disponible para esta búsqueda.',
+    )
 
 
 @router.get('/api/gmail/status')
