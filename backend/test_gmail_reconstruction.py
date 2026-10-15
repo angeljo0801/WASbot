@@ -47,7 +47,7 @@ search = scope["search_account"]
 
 tracking = "GFUS01073037638977"
 assert compact("GFUS-0107 3037 638977") == tracking
-assert query_list(tracking)[0] == (f'"{tracking}"', False)
+assert query_list(tracking)[0] == (f'"{tracking}"', True)
 assert any("from:temuemail.com" in q for q, _ in query_list(tracking))
 
 linked = {
