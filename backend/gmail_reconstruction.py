@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import html
+import logging
 import re
 import os
 import threading
@@ -41,6 +42,7 @@ JOB_DIR.mkdir(parents=True, exist_ok=True)
 JOB_EXECUTOR = ThreadPoolExecutor(max_workers=max(2, int(os.getenv('GMAIL_JOB_WORKERS', '3'))))
 JOB_LOCK = threading.Lock()
 router = APIRouter()
+logger = logging.getLogger('uvicorn.error')
 
 
 def gmail_json(path: str, token: str) -> dict[str, Any]:
@@ -475,59 +477,120 @@ def _gmail_search_queries(seed: str) -> list[tuple[str, bool]]:
     if len(compact) >= 13:
         # A tracking number can be split by HTML or Gmail punctuation indexing.
         queries.append((f'"{compact[-11:]}"', True))
-    # Some shops put tracking only in shipping emails / URLs. Scan recent
-    # shipping messages as a bounded final fallback; NEVER trust them without
-    # confirming the whole tracking number in the email or its HTML links.
+    # Tracking from Temu/GOFO is sometimes only present inside URLs. Gmail
+    # does not reliably index href values, so enumerate merchant email safely,
+    # and verify the complete identifier in the actual decoded MIME body.
     if len(compact) >= 14:
         queries.append((
-            'newer_than:2y {from:shein.com from:temu.com from:gofo.com '
-            'subject:tracking subject:shipped subject:delivered}', True,
+            'newer_than:2y {from:temuemail.com from:temu.com '
+            'from:gofoexpress.com from:gofo.com from:shein.com}', True,
+        ))
+        queries.append((
+            'newer_than:1y {subject:tracking subject:shipped '
+            'subject:delivered subject:package}', True,
         ))
     return list(dict.fromkeys(queries))
 
 
+def _message_contains_identifier(message: dict[str, Any], seed: str) -> bool:
+    """Verify the real identifier inside decoded MIME text / HTML / links."""
+    needle = _compact_identifier(seed)
+    if len(needle) < 8:
+        return False
+    parts: list[str] = []
+    payload = message.get('payload') or {}
+    for heading in payload.get('headers') or []:
+        if str(heading.get('name') or '').lower() in ('subject', 'from'):
+            parts.append(str(heading.get('value') or ''))
+
+    def walk(part: dict[str, Any]) -> None:
+        encoded = (part.get('body') or {}).get('data')
+        if encoded:
+            raw = decode_urlsafe(str(encoded)).decode('utf-8', 'ignore')
+            if raw:
+                # Shipping websites often URL-encode href values twice.
+                decoded = html.unescape(raw)
+                for _ in range(2):
+                    decoded = html.unescape(urllib.parse.unquote(decoded))
+                parts.append(decoded)
+                if '<' in decoded:
+                    parts.append(strip_html(decoded))
+        for sub in part.get('parts') or []:
+            if isinstance(sub, dict):
+                walk(sub)
+
+    walk(payload)
+    return needle in _compact_identifier('\n'.join(parts))
+
+
 def search_account(account_id: int, source_email: str, token: str, seed: str) -> list[dict[str, Any]]:
-    # Multiple strategies fix false "not found" when Gmail tokenizes tracking,
-    # stores it in a URL, or has more than 15 shipment messages.
+    """Use exact indexed Gmail search, then verified bounded fallback scans."""
     records: dict[str, dict[str, Any]] = {}
     inspected: set[str] = set()
+    failed_reads = 0
 
-    def fetch_one(message_id: str) -> dict[str, Any] | None:
-        try:
-            full = gmail_json(
-                f'messages/{urllib.parse.quote(message_id)}?format=full', token,
-            )
-            return record(full, token, account_id, source_email)
-        except Exception:
-            # A broken individual message should not hide all other matches.
+    def fetch_one(message_id: str, must_verify: bool) -> dict[str, Any] | None:
+        full = gmail_json(
+            f'messages/{urllib.parse.quote(message_id)}?format=full', token,
+        )
+        # Avoid costly image/attachment parsing on irrelevant shipping emails.
+        if must_verify and not _message_contains_identifier(full, seed):
             return None
+        row = record(full, token, account_id, source_email)
+        if must_verify and not _identifier_in_record(row, seed):
+            return None
+        return row
 
     for query_text, must_verify in _gmail_search_queries(seed):
-        params = urllib.parse.urlencode({
-            'q': query_text,
-            'maxResults': '100' if must_verify else '50',
-        })
-        listing = gmail_json('messages?' + params, token)
-        message_ids = [
-            str(row.get('id') or '').strip()
-            for row in (listing.get('messages') or [])
-            if str(row.get('id') or '').strip()
-        ]
-        fresh = [mid for mid in message_ids if mid not in inspected]
-        inspected.update(fresh)
-        if not fresh:
-            continue
-        with ThreadPoolExecutor(max_workers=min(8, len(fresh))) as executor:
-            futures = [executor.submit(fetch_one, mid) for mid in fresh]
-            for future in as_completed(futures):
-                row = future.result()
-                if row and (not must_verify or _identifier_in_record(row, seed)):
-                    records[str(row['id'])] = row
-
+        # Enumerate up to 250 recent merchant emails when Gmail does not index
+        # tracking in links. Other strategies stay within one 100-item page.
+        merchant_scan = 'from:temuemail.com' in query_text
+        max_pages = 3 if merchant_scan else 1
+        next_page = ''
+        for _ in range(max_pages):
+            params = {
+                'q': query_text,
+                'maxResults': '100' if must_verify else '50',
+                'includeSpamTrash': 'true',
+            }
+            if next_page:
+                params['pageToken'] = next_page
+            listing = gmail_json('messages?' + urllib.parse.urlencode(params), token)
+            message_ids = [
+                str(row.get('id') or '').strip()
+                for row in (listing.get('messages') or [])
+                if str(row.get('id') or '').strip()
+            ]
+            fresh = [mid for mid in message_ids if mid not in inspected]
+            inspected.update(fresh)
+            if fresh:
+                with ThreadPoolExecutor(max_workers=min(8, len(fresh))) as executor:
+                    futures = [executor.submit(fetch_one, mid, must_verify) for mid in fresh]
+                    for future in as_completed(futures):
+                        try:
+                            row = future.result()
+                            if row:
+                                records[str(row['id'])] = row
+                        except Exception:
+                            failed_reads += 1
+            if records:
+                break
+            next_page = str(listing.get('nextPageToken') or '')
+            if not next_page:
+                break
         if records:
-            # Once actual tracking matches are found do not dilute item/photo
-            # extraction with emails about unrelated orders or advertisements.
             break
+
+    logger.info(
+        'Gmail tracking lookup accountId=%s found=%s inspected=%s failedReads=%s',
+        account_id, len(records), len(inspected), failed_reads,
+    )
+    if not records and failed_reads:
+        raise HTTPException(
+            status_code=503,
+            detail='Algunos mensajes de Gmail no pudieron leerse. '
+                   'La búsqueda no se marcará como No encontrado. Vuelve a intentar.',
+        )
     return list(records.values())
 
 
@@ -650,7 +713,14 @@ def api_start_reconstruction_job(
     if not order and not track:
         raise HTTPException(status_code=422, detail='Provide order_number or tracking')
     if client_token.strip():
-        job_id = 'c_' + hashlib.sha256(client_token.strip().encode('utf-8')).hexdigest()[:32]
+        # Different client scopes must never reuse each other's cached result.
+        # Older jobs with the same token only were responsible for cross-scope
+        # races between foreground and background scans.
+        identity = json.dumps(
+            [client_token.strip(), client_id.strip(), order, track],
+            separators=(',', ':'),
+        )
+        job_id = 'c_' + hashlib.sha256(identity.encode('utf-8')).hexdigest()[:32]
     else:
         job_id = uuid.uuid4().hex
     job = _ensure_job(job_id, order, track, client_id.strip())
