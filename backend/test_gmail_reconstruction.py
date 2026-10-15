@@ -3,6 +3,7 @@ import ast
 import base64
 import html
 import re
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -34,6 +35,8 @@ def encode_mail(text):
 
 scope = {
     "re": re, "urllib": urllib, "html": html,
+    "time": time, "GMAIL_SEARCH_BUDGET_SECONDS": 85,
+    "GMAIL_SEARCH_MAX_MESSAGES": 100,
     "ThreadPoolExecutor": ThreadPoolExecutor, "as_completed": as_completed,
     "Any": object, "decode_urlsafe": decode_urlsafe, "strip_html": lambda x: x,
     "HTTPException": StubHTTPException, "logger": StubLogger(),
