@@ -143,6 +143,42 @@ assert [a[0] for a in auth_scope["active_account_tokens"]("client-1")] == [1, 2]
 assert [a[0] for a in auth_scope["active_account_tokens"]("client-2")] == [1, 3]
 assert [a[0] for a in auth_scope["active_account_tokens"]("")] == [1, 2, 3]
 
+# Distinguish expired/invalid refresh tokens from missing accounts and
+# transient Google API failures: the app must guide reauthorization.
+auth_scope["access_token_for_account"] = lambda id: (_ for _ in ()).throw(
+    StubHTTPException(502, '{"error":"invalid_grant"}')
+)
+try:
+    auth_scope["active_account_tokens"]("client-1")
+    raise AssertionError("Expired Gmail authorization should fail clearly")
+except StubHTTPException as exc:
+    assert exc.status_code == 401
+    assert "Volver a autorizar" in exc.detail
+
+auth_scope["access_token_for_account"] = lambda id: (_ for _ in ()).throw(
+    StubHTTPException(502, "Google API error: timeout")
+)
+try:
+    auth_scope["active_account_tokens"]("client-1")
+    raise AssertionError("Transient Gmail authorization failure must be retryable")
+except StubHTTPException as exc:
+    assert exc.status_code == 503
+
+auth_scope["access_token_for_account"] = lambda id: f"token-{id}"
+try:
+    auth_scope["active_account_tokens"]("unknown-client")
+    # Shared company inbox remains in scope, so this must succeed.
+except StubHTTPException:
+    raise AssertionError("Shared authorized inbox should be included")
+auth_scope["accounts_rows"] = lambda enabled_only: [accounts[1]]
+try:
+    auth_scope["active_account_tokens"]("client-2")
+    raise AssertionError("Other customers' mailboxes cannot be accessed")
+except StubHTTPException as exc:
+    assert exc.status_code == 409
+
+
+
 # Cache keys must not be re-used for an unscoped versus scoped search.
 reconstruction_function = next(node for node in parsed.body
     if isinstance(node, ast.FunctionDef) and node.name == "reconstruct")
