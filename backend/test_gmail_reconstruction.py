@@ -152,3 +152,56 @@ assert "if account_errors and not records:" in body
 assert "[client_token.strip(), client_id.strip(), order, track]" in source
 
 print("Gmail tracking/search scope regression tests passed.")
+
+
+# One Railway job must be scheduled once even if Android polls/reposts often.
+import concurrent.futures
+import threading
+
+job_source = Path(__file__).with_name("gmail_reconstruction.py").read_text(encoding="utf-8")
+module = ast.parse(job_source)
+job_helpers = [n for n in module.body if isinstance(n, ast.FunctionDef)
+               and n.name in {"_submit_job_once", "_ensure_job"}]
+assert len(job_helpers) == 2
+
+class FakeFuture:
+    def done(self):
+        return False
+
+class FakeExecutor:
+    def __init__(self):
+        self.calls = []
+    def submit(self, *args):
+        self.calls.append(args)
+        return FakeFuture()
+
+class FakeJobStore:
+    def __init__(self):
+        self.items = {}
+    def read(self, id):
+        return self.items.get(id)
+    def write(self, id, value):
+        self.items[id] = value
+
+runner = FakeExecutor()
+store = FakeJobStore()
+job_scope = {
+    "JOB_EXECUTOR": runner, "JOB_FUTURES_LOCK": threading.Lock(),
+    "ACTIVE_JOB_FUTURES": {}, "_run_reconstruction_job": lambda *args: None,
+    "_read_job": store.read, "_write_job": store.write,
+    "datetime": __import__("datetime").datetime,
+    "timezone": __import__("datetime").timezone,
+}
+exec(compile(ast.Module(body=job_helpers, type_ignores=[]), "<job-tests>", "exec"), job_scope)
+first = job_scope["_ensure_job"]("case", "", tracking, "client-1")
+second = job_scope["_ensure_job"]("case", "", tracking, "client-1")
+assert first["status"] == second["status"] == "queued"
+assert len(runner.calls) == 1
+job_scope["_submit_job_once"]("case", "", tracking, "client-1")
+assert len(runner.calls) == 1
+store.items["case"] = {**first, "status": "failed", "error": "temporary API error"}
+failed = job_scope["_ensure_job"]("case", "", tracking, "client-1")
+assert failed["status"] == "failed"
+assert len(runner.calls) == 1
+
+print("Gmail job deduplication regression tests passed.")
