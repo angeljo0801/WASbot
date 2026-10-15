@@ -17,8 +17,10 @@ jobs:
         with:
           python-version: '3.12'
       - name: Compile backend Python
-        run: python -m py_compile backend/app.py backend/main.py backend/combo.py backend/remittances.py backend/assistant_features.py backend/test_remittances.py backend/gmail_reconstruction.py backend/test_gmail_reconstruction.py
+        run: python -m py_compile backend/app.py backend/main.py backend/combo.py backend/remittances.py backend/assistant_features.py backend/test_remittances.py backend/gmail_reconstruction.py backend/test_gmail_reconstruction.py backend/gmail_oauth.py backend/test_gmail_diagnostics.py
       - name: Test remittance rules
         run: python backend/test_remittances.py
       - name: Test Gmail tracking fallback and false-positive guards
         run: python backend/test_gmail_reconstruction.py
+      - name: Test Gmail live-permission diagnostics without real accounts
+        run: python backend/test_gmail_diagnostics.py
