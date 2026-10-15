@@ -4,6 +4,7 @@ import io
 import json
 import html
 import logging
+import time
 import re
 import os
 import threading
@@ -41,6 +42,8 @@ JOB_DIR = DATA_DIR / 'gmail_jobs'
 JOB_DIR.mkdir(parents=True, exist_ok=True)
 JOB_EXECUTOR = ThreadPoolExecutor(max_workers=max(2, int(os.getenv('GMAIL_JOB_WORKERS', '3'))))
 JOB_LOCK = threading.Lock()
+GMAIL_SEARCH_BUDGET_SECONDS = 85
+GMAIL_SEARCH_MAX_MESSAGES = 100
 router = APIRouter()
 logger = logging.getLogger('uvicorn.error')
 
@@ -282,6 +285,7 @@ def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _run_reconstruction_job(job_id: str, order: str, tracking: str, client_id: str = '') -> None:
     started = datetime.now(timezone.utc).isoformat()
+    logger.info('Gmail job start jobId=%s trackingPrefix=%s', job_id, tracking[:4])
     _write_job(job_id, {
         'jobId': job_id,
         'status': 'running',
@@ -293,7 +297,10 @@ def _run_reconstruction_job(job_id: str, order: str, tracking: str, client_id: s
     })
     try:
         result = reconstruct(order, tracking, client_id)
-        result['emailPhotoCandidates'] = _prepare_media_candidates(result)
+        logger.info('Gmail job search finished jobId=%s found=%s accounts=%s',
+                    job_id, result.get('found'), len(result.get('accountsSearched') or []))
+        result['emailPhotoCandidates'] = _prepare_media_candidates(result) if result.get('found') else []
+        logger.info('Gmail job finished jobId=%s', job_id)
         completed = datetime.now(timezone.utc).isoformat()
         _write_job(job_id, {
             'jobId': job_id,
@@ -309,6 +316,9 @@ def _run_reconstruction_job(job_id: str, order: str, tracking: str, client_id: s
     except Exception as exc:
         completed = datetime.now(timezone.utc).isoformat()
         detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        logger.warning('Gmail job failed jobId=%s type=%s httpStatus=%s',
+                       job_id, type(exc).__name__,
+                       exc.status_code if isinstance(exc, HTTPException) else 500)
         _write_job(job_id, {
             'jobId': job_id,
             'status': 'failed',
@@ -324,7 +334,9 @@ def _run_reconstruction_job(job_id: str, order: str, tracking: str, client_id: s
 
 def _ensure_job(job_id: str, order: str, tracking: str, client_id: str = '') -> dict[str, Any]:
     existing = _read_job(job_id)
-    if existing and existing.get('status') in {'queued', 'running', 'completed'}:
+    # Re-posting the same token must not launch the same failed job again.
+    # Deliberate user retries carry a fresh client token.
+    if existing and existing.get('status') in {'queued', 'running', 'completed', 'failed'}:
         return existing
     queued = {
         'jobId': job_id,
@@ -526,16 +538,17 @@ def _message_contains_identifier(message: dict[str, Any], seed: str) -> bool:
 
 
 def search_account(account_id: int, source_email: str, token: str, seed: str) -> list[dict[str, Any]]:
-    """Use exact indexed Gmail search, then verified bounded fallback scans."""
+    """Bounded Gmail search: no endless requests or false negative on API error."""
     records: dict[str, dict[str, Any]] = {}
     inspected: set[str] = set()
     failed_reads = 0
+    started = time.monotonic()
+    budget_exhausted = False
 
     def fetch_one(message_id: str, must_verify: bool) -> dict[str, Any] | None:
         full = gmail_json(
             f'messages/{urllib.parse.quote(message_id)}?format=full', token,
         )
-        # Avoid costly image/attachment parsing on irrelevant shipping emails.
         if must_verify and not _message_contains_identifier(full, seed):
             return None
         row = record(full, token, account_id, source_email)
@@ -543,16 +556,29 @@ def search_account(account_id: int, source_email: str, token: str, seed: str) ->
             return None
         return row
 
-    for query_text, must_verify in _gmail_search_queries(seed):
-        # Enumerate up to 250 recent merchant emails when Gmail does not index
-        # tracking in links. Other strategies stay within one 100-item page.
+    for query_index, (query_text, must_verify) in enumerate(_gmail_search_queries(seed)):
+        if time.monotonic() - started >= GMAIL_SEARCH_BUDGET_SECONDS:
+            budget_exhausted = True
+            break
+        # Bound candidate inspection per account, keeping room for merchant URLs.
+        remaining = GMAIL_SEARCH_MAX_MESSAGES - len(inspected)
+        if remaining <= 0:
+            budget_exhausted = True
+            break
         merchant_scan = 'from:temuemail.com' in query_text
-        max_pages = 3 if merchant_scan else 1
         next_page = ''
-        for _ in range(max_pages):
+        for _ in range(2 if merchant_scan else 1):
+            if time.monotonic() - started >= GMAIL_SEARCH_BUDGET_SECONDS:
+                budget_exhausted = True
+                break
+            remaining = GMAIL_SEARCH_MAX_MESSAGES - len(inspected)
+            if remaining <= 0:
+                budget_exhausted = True
+                break
+            requested = min(35 if merchant_scan else (25 if query_index < 3 else 20), remaining)
             params = {
                 'q': query_text,
-                'maxResults': '100' if must_verify else '50',
+                'maxResults': str(requested),
                 'includeSpamTrash': 'true',
             }
             if next_page:
@@ -566,7 +592,8 @@ def search_account(account_id: int, source_email: str, token: str, seed: str) ->
             fresh = [mid for mid in message_ids if mid not in inspected]
             inspected.update(fresh)
             if fresh:
-                with ThreadPoolExecutor(max_workers=min(8, len(fresh))) as executor:
+                # Limit simultaneous Gmail API requests to avoid quota throttling.
+                with ThreadPoolExecutor(max_workers=min(5, len(fresh))) as executor:
                     futures = [executor.submit(fetch_one, mid, must_verify) for mid in fresh]
                     for future in as_completed(futures):
                         try:
@@ -580,18 +607,19 @@ def search_account(account_id: int, source_email: str, token: str, seed: str) ->
             next_page = str(listing.get('nextPageToken') or '')
             if not next_page:
                 break
-        if records:
+        if records or budget_exhausted:
             break
 
     logger.info(
-        'Gmail tracking lookup accountId=%s found=%s inspected=%s failedReads=%s',
+        'Gmail tracking lookup accountId=%s found=%s inspected=%s failedReads=%s elapsed=%.1fs budgetExhausted=%s',
         account_id, len(records), len(inspected), failed_reads,
+        time.monotonic() - started, budget_exhausted,
     )
-    if not records and failed_reads:
+    if not records and (failed_reads or budget_exhausted):
         raise HTTPException(
             status_code=503,
-            detail='Algunos mensajes de Gmail no pudieron leerse. '
-                   'La búsqueda no se marcará como No encontrado. Vuelve a intentar.',
+            detail=('Gmail no terminó de revisar todos los correos. '
+                    'Intenta de nuevo más tarde; no se marcará como No encontrado.'),
         )
     return list(records.values())
 
