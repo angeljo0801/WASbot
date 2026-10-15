@@ -186,6 +186,7 @@ class FakeJobStore:
 runner = FakeExecutor()
 store = FakeJobStore()
 job_scope = {
+    "Any": object,
     "JOB_EXECUTOR": runner, "JOB_FUTURES_LOCK": threading.Lock(),
     "ACTIVE_JOB_FUTURES": {}, "_run_reconstruction_job": lambda *args: None,
     "_read_job": store.read, "_write_job": store.write,
