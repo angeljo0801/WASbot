@@ -318,12 +318,15 @@ def active_account_tokens(client_id: str = '') -> list[tuple[int, str, str]]:
     rows = accounts_rows(enabled_only=True)
     client_id = client_id.strip()
     if client_id:
-        linked = [
+        # Packages may be associated with a customer's Gmail, but the business
+        # owner often receives the Temu/GOFO tracking in the shared company
+        # inbox. Search that unassigned inbox as well, without opening another
+        # customer's private linked account.
+        scoped = [
             row for row in rows
-            if str(row['client_id'] or '').strip() == client_id
+            if str(row['client_id'] or '').strip() in ('', client_id)
         ]
-        if linked:
-            rows = linked
+        rows = scoped
     out: list[tuple[int, str, str]] = []
     for row in rows:
         if not (row['refresh_token'] or row['access_token']):
