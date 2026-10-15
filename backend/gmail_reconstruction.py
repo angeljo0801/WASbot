@@ -2,6 +2,8 @@ import base64
 import hashlib
 import io
 import json
+import html
+import re
 import os
 import threading
 import urllib.parse
@@ -432,6 +434,13 @@ def record(message: dict[str, Any], token: str, account_id: int, source_email: s
         'date': header(payload, 'Date'),
         'body': body,
         'remoteImages': remote_images(html_parts),
+        # Tracking is sometimes present only inside HTML button/link hrefs.
+        # strip_html removes those hrefs, so retain them for match validation.
+        'linkTargets': [
+            urllib.parse.unquote(html.unescape(value))
+            for source in html_parts
+            for value in re.findall(r'''(?is)\bhref\s*=\s*["']([^"']+)''', source)
+        ][:350],
         'attachmentImages': images,
     }
 
@@ -440,44 +449,100 @@ def recompact(value: str) -> str:
     return ' '.join(value.lower().split())
 
 
+def _compact_identifier(value: str) -> str:
+    """Comparable identifier even when email HTML inserts spaces/dashes."""
+    return re.sub(r'[^A-Z0-9]', '', value.upper())
+
+
+def _identifier_in_record(row: dict[str, Any], identifier: str) -> bool:
+    needle = _compact_identifier(identifier)
+    if len(needle) < 8:
+        return False
+    haystack = '\n'.join(str(row.get(key) or '') for key in ('subject', 'body'))
+    haystack += '\n' + '\n'.join(str(x) for x in row.get('linkTargets') or [])
+    return needle in _compact_identifier(haystack)
+
+
+def _gmail_search_queries(seed: str) -> list[tuple[str, bool]]:
+    """Exact tracking first; fallbacks must verify the full tracking locally."""
+    clean = seed.strip().strip('"')
+    compact = _compact_identifier(clean)
+    queries: list[tuple[str, bool]] = [(f'"{clean}"', False)]
+    if compact != clean.upper():
+        queries.append((compact, True))
+    else:
+        queries.append((clean, True))
+    if len(compact) >= 13:
+        # A tracking number can be split by HTML or Gmail punctuation indexing.
+        queries.append((f'"{compact[-11:]}"', True))
+    # Some shops put tracking only in shipping emails / URLs. Scan recent
+    # shipping messages as a bounded final fallback; NEVER trust them without
+    # confirming the whole tracking number in the email or its HTML links.
+    if len(compact) >= 14:
+        queries.append((
+            'newer_than:2y {from:shein.com from:temu.com from:gofo.com '
+            'subject:tracking subject:shipped subject:delivered}', True,
+        ))
+    return list(dict.fromkeys(queries))
+
+
 def search_account(account_id: int, source_email: str, token: str, seed: str) -> list[dict[str, Any]]:
-    safe_seed = seed.replace('"', '')
-    query = urllib.parse.urlencode({'q': f'"{safe_seed}"', 'maxResults': '15'})
-    listing = gmail_json('messages?' + query, token)
-    message_ids = [
-        str(item.get('id') or '')
-        for item in (listing.get('messages') or [])
-        if str(item.get('id') or '')
-    ][:15]
-    if not message_ids:
-        return []
+    # Multiple strategies fix false "not found" when Gmail tokenizes tracking,
+    # stores it in a URL, or has more than 15 shipment messages.
+    records: dict[str, dict[str, Any]] = {}
+    inspected: set[str] = set()
 
     def fetch_one(message_id: str) -> dict[str, Any] | None:
         try:
-            full = gmail_json(f'messages/{urllib.parse.quote(message_id)}?format=full', token)
+            full = gmail_json(
+                f'messages/{urllib.parse.quote(message_id)}?format=full', token,
+            )
             return record(full, token, account_id, source_email)
         except Exception:
+            # A broken individual message should not hide all other matches.
             return None
 
-    records: list[dict[str, Any]] = []
-    workers = max(1, min(8, len(message_ids)))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(fetch_one, message_id) for message_id in message_ids]
-        for future in as_completed(futures):
-            row = future.result()
-            if row:
-                records.append(row)
-    return records
+    for query_text, must_verify in _gmail_search_queries(seed):
+        params = urllib.parse.urlencode({
+            'q': query_text,
+            'maxResults': '100' if must_verify else '50',
+        })
+        listing = gmail_json('messages?' + params, token)
+        message_ids = [
+            str(row.get('id') or '').strip()
+            for row in (listing.get('messages') or [])
+            if str(row.get('id') or '').strip()
+        ]
+        fresh = [mid for mid in message_ids if mid not in inspected]
+        inspected.update(fresh)
+        if not fresh:
+            continue
+        with ThreadPoolExecutor(max_workers=min(8, len(fresh))) as executor:
+            futures = [executor.submit(fetch_one, mid) for mid in fresh]
+            for future in as_completed(futures):
+                row = future.result()
+                if row and (not must_verify or _identifier_in_record(row, seed)):
+                    records[str(row['id'])] = row
+
+        if records:
+            # Once actual tracking matches are found do not dilute item/photo
+            # extraction with emails about unrelated orders or advertisements.
+            break
+    return list(records.values())
 
 
 def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dict[str, Any]:
-    seed = order.strip() or tracking.strip()
+    # Never use a storefront label from the optional order field instead of tracking.
+    seed = tracking.strip() or order.strip()
     if not seed:
         raise HTTPException(status_code=422, detail='Provide order_number or tracking')
 
     accounts = active_account_tokens(client_id)
     if not accounts:
-        raise HTTPException(status_code=409, detail='No enabled Gmail accounts are connected')
+        raise HTTPException(
+            status_code=409,
+            detail='No hay cuentas Gmail autorizadas disponibles. Revisa las cuentas conectadas y vuelve a autorizar si hace falta.',
+        )
 
     records: list[dict[str, Any]] = []
     account_errors: list[dict[str, Any]] = []
@@ -494,6 +559,13 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
             except Exception as exc:
                 detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
                 account_errors.append({'accountId': account_id, 'email': email, 'error': str(detail)})
+
+    if account_errors and not records:
+        raise HTTPException(
+            status_code=503,
+            detail='La búsqueda en Gmail no pudo completarse en todas las cuentas. '
+                   'Revisa la conexión o autorización e inténtalo de nuevo.',
+        )
 
     # Gmail message IDs are only unique inside an account.
     unique: dict[tuple[int, str], dict[str, Any]] = {}
