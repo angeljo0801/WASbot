@@ -590,3 +590,103 @@ def callback(code: str = '', state: str = '', error: str = '') -> HTMLResponse:
         '<p>Ya puedes cerrar esta página. La cuenta quedó autorizada para buscar compras y tracking.</p>'
         '</div>'
     )
+
+
+def _classify_gmail_check_error(detail: str) -> tuple[str, str]:
+    """Return safe public errors; never echo tokens or raw Google responses."""
+    value = detail.lower()
+    if any(v in value for v in (
+        'invalid_grant', 'invalid_token', 'revoked', 'token has been expired',
+        'reconnect gmail', 'unauthorized_client', 'token has been revoked',
+        'invalid credentials', 'invalid authentication credentials',
+    )):
+        return ('expired', 'Permiso caducado o revocado. Vuelve a autorizar esta cuenta.')
+    if any(v in value for v in (
+        'insufficientpermissions', 'insufficient authentication scopes',
+        'insufficient permission', 'access_denied',
+    )):
+        return ('missing_permissions', 'Google no concedió lectura de Gmail. Vuelve a autorizar y acepta el permiso.')
+    if any(v in value for v in (
+        'accessnotconfigured', 'access_not_configured', 'api has not been used',
+        'api is disabled', 'oauth is not configured',
+    )):
+        return ('configuration_error', 'Gmail API u OAuth no están configurados correctamente en Google Cloud.')
+    if '429' in value or 'rate limit' in value or 'quota' in value:
+        return ('temporary_error', 'Google limita temporalmente las solicitudes. Intenta más tarde.')
+    if '401' in value:
+        return ('expired', 'Google rechazó la autorización. Vuelve a autorizar esta cuenta.')
+    if '403' in value:
+        return ('permission_error', 'Google denegó el acceso; comprueba los permisos y la configuración de Gmail.')
+    return ('temporary_error', 'No se pudo verificar Gmail por un error temporal de Google o la conexión.')
+
+
+def _diagnose_gmail_account(row: sqlite3.Row) -> dict[str, Any]:
+    """Non-destructive Gmail profile probe; refreshes access token if needed."""
+    info = _public_account(row)
+    result: dict[str, Any] = {
+        'id': info['id'],
+        'email': info['email'],
+        'enabled': info['enabled'],
+        'primary': info['primary'],
+        'clientId': info['clientId'],
+        'clientName': info['clientName'],
+        'status': 'not_checked',
+        'message': '',
+    }
+    if not row['enabled']:
+        result.update(status='disabled', message='Cuenta desactivada para búsquedas. No se ha comprobado.')
+        return result
+    if not (row['refresh_token'] or row['access_token']):
+        result.update(status='not_connected', message='No tiene autorización de Google. Pulsa Volver a autorizar.')
+        return result
+    if not row['refresh_token']:
+        result.update(status='expired', message='Falta permiso de renovación. Vuelve a autorizar esta cuenta.')
+        return result
+    if not CLIENT_ID or not CLIENT_SECRET:
+        result.update(status='configuration_error', message='OAuth de Gmail no está configurado en el servidor.')
+        return result
+    try:
+        access = access_token_for_account(int(row['id']))
+        if not access:
+            raise HTTPException(status_code=503, detail='Google returned an empty access token')
+        # gmail.readonly grants access to this metadata-only call. No emails
+        # are fetched, modified, archived or deleted by the diagnosis.
+        request_json(
+            'https://gmail.googleapis.com/gmail/v1/users/me/profile',
+            headers={'Authorization': f'Bearer {access}'},
+        )
+    except HTTPException as exc:
+        state, explanation = _classify_gmail_check_error(str(exc.detail))
+        result.update(status=state, message=explanation)
+    except Exception:
+        result.update(
+            status='temporary_error',
+            message='No se pudo completar la comprobación por un error de conexión.',
+        )
+    else:
+        result.update(status='authorized', message='Google confirmó que esta cuenta permite leer Gmail.')
+    return result
+
+
+@router.post('/api/gmail/accounts/diagnostics')
+def diagnose_gmail_accounts(x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+    """Checks all account authorizations only on explicit user request."""
+    require_key(x_api_key)
+    from concurrent.futures import ThreadPoolExecutor
+
+    rows = accounts_rows()
+    # Modest concurrency: bound API load for multiple mailboxes and avoid
+    # blocking the request for many sequential OAuth network roundtrips.
+    with ThreadPoolExecutor(max_workers=min(3, max(1, len(rows)))) as executor:
+        results = list(executor.map(_diagnose_gmail_account, rows))
+    return {
+        'accounts': results,
+        'checkedAt': int(time.time()),
+        'summary': {
+            'authorized': sum(x['status'] == 'authorized' for x in results),
+            'needsAttention': sum(x['status'] not in ('authorized', 'disabled') for x in results),
+            'disabled': sum(x['status'] == 'disabled' for x in results),
+        },
+        'note': ('El estado Activa solo habilita búsquedas; esta prueba verifica '
+                 'la autorización real con Google.'),
+    }
