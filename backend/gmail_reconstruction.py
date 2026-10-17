@@ -355,6 +355,25 @@ def _run_reconstruction_job(job_id: str, order: str, tracking: str, client_id: s
         logger.info('Gmail job search finished jobId=%s found=%s accounts=%s',
                     job_id, result.get('found'), len(result.get('accountsSearched') or []))
         result['emailPhotoCandidates'] = _prepare_media_candidates(result) if result.get('found') else []
+        # If the selected storefront email has no usable images (e.g. all
+        # broken URLs/logos), retry ONE other verified storefront message,
+        # never combine its photos with the original or courier proof.
+        if result.get('found') and not result['emailPhotoCandidates']:
+            for fallback in result.pop('_photoFallbackGroups', []):
+                candidate = {
+                    **result,
+                    'emailPhotoUrls': fallback['emailPhotoUrls'],
+                    'emailAttachmentImages': fallback['emailAttachmentImages'],
+                }
+                prepared = _prepare_media_candidates(candidate)
+                if prepared:
+                    result['emailPhotoUrls'] = fallback['emailPhotoUrls']
+                    result['emailAttachmentImages'] = fallback['emailAttachmentImages']
+                    result['emailPhotoCandidates'] = prepared
+                    result['photoSourceRule'] += '_fallback'
+                    break
+        else:
+            result.pop('_photoFallbackGroups', None)
         result['photoDiagnostics'] = {
             'emails': len(result.get('messageIds') or []),
             'remoteImages': len(result.get('emailPhotoUrls') or []),
@@ -880,6 +899,51 @@ def _rank_product_photo_messages(
     return prioritized + remaining, rule
 
 
+def _select_primary_product_photo_source(
+    records: list[dict[str, Any]], merchant: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    """Never merge multiple SHEIN/Temu mail images in a single reconstruction.
+
+    The prior 'ranking' implementation returned every email; iterating them
+    collected all their images despite the preferred date ordering.
+    Other retailers retain their previous behavior.
+    """
+    ranked, rule = _rank_product_photo_messages(records, merchant)
+    key = merchant.strip().lower()
+    if key not in {'shein', 'temu'}:
+        return ranked, [], rule
+
+    matching_store = [
+        row for row in ranked
+        if _merchant_family(str(row.get('from') or '')) == key
+        and not _delivery_proof_message(row)
+        and (row.get('remoteImages') or row.get('attachmentImages'))
+    ]
+    if not matching_store:
+        # Only courier images or no authenticated storefront photos:
+        # keep the order match but do not pretend delivery proof is a product.
+        return [], [], f'{key}_no_store_photo'
+
+    # Precisely ONE preferred source. Backup sources remain server-side and
+    # are consulted only if the preferred email yields no usable image.
+    return matching_store[:1], matching_store[1:], rule
+
+
+def _source_photo_fields(
+    rows: list[dict[str, Any]],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    urls: list[str] = []
+    attachments: list[dict[str, Any]] = []
+    for row in rows:
+        for url in row.get('remoteImages') or []:
+            if url not in urls:
+                urls.append(url)
+        for image in row.get('attachmentImages') or []:
+            if image not in attachments:
+                attachments.append(image)
+    return urls, attachments
+
+
 def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dict[str, Any]:
     # Never use a storefront label from the optional order field instead of tracking.
     seed = tracking.strip() or order.strip()
@@ -945,25 +1009,18 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         if carrier not in carriers:
             carriers.append(carrier)
 
-    # Keep chronology of verified emails for metadata, but prioritize
-    # product-photo messages by retailer and email type for image selection.
-    photo_rows, photo_rule = _rank_product_photo_messages(
-        records, store_name(records),
+    # Restrict product images to the chosen email, not every related email.
+    # Keep other verified messages for order metadata and last-email status.
+    merchant = store_name(records)
+    photo_rows, fallback_rows, photo_rule = _select_primary_product_photo_source(
+        records, merchant,
     )
-    urls: list[str] = []
-    attachments: list[dict[str, Any]] = []
+    urls, attachments = _source_photo_fields(photo_rows)
     source_emails: list[str] = []
     for row in reversed(records):
         source_email = str(row.get('sourceEmail') or '')
         if source_email and source_email not in source_emails:
             source_emails.append(source_email)
-    for row in photo_rows:
-        for url in row.get('remoteImages') or []:
-            if url not in urls:
-                urls.append(url)
-        for image in row.get('attachmentImages') or []:
-            if image not in attachments:
-                attachments.append(image)
 
     return {
         'found': bool(records),
@@ -985,6 +1042,17 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         'currency': 'USD',
         'items': items(combined),
         'photoSourceRule': photo_rule,
+        'photoSourceMessageCount': len(photo_rows),
+        # Never expose these alternative images as normal photo candidates.
+        # They are considered only if the primary email yielded zero images.
+        '_photoFallbackGroups': [
+            {
+                'emailPhotoUrls': _source_photo_fields([row])[0],
+                'emailAttachmentImages': _source_photo_fields([row])[1],
+                'messageId': str(row.get('id') or ''),
+            }
+            for row in fallback_rows
+        ],
         'emailPhotoUrls': urls[:60],
         'deliveryPhotoUrls': _delivery_photo_urls(records),
         'emailAttachmentImages': attachments[:60],
