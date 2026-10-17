@@ -201,6 +201,51 @@ def _cache_remote_image(url: str) -> dict[str, Any]:
     }
 
 
+_POD_WORDS = re.compile(
+    r'(?i)(?:\bproof\s+of\s+delivery\b|\bdelivery\s+(?:photos?|pictures?|images?)\b|'
+    r'\b(?:photos?|pictures?|images?)\s+(?:of|from)\s+(?:your|the)\s+delivery\b|'
+    r'\b(?:delivered|drop[- ]?off)\s+(?:photos?|pictures?|images?)\b|'
+    r'\bfotos?\s+de\s+(?:la\s+)?entrega\b|\bprueba\s+de\s+entrega\b)'
+)
+_COURIER_SENDER = re.compile(
+    r'(?i)(?:gofo|speedx|ontrac|lasership|fedex|ups\.com|usps|dhl|'
+    r'amazonlogistics|amazon\.shipping|shippingcarrier)'
+)
+_DELIVERED_EVENT = re.compile(
+    r'(?i)(?:\bdelivered\b|\bentregado\b|\bdelivery\s+complete\b|'
+    r'\bleft\s+(?:at|on|by)\b|\bdelivered\s+to\s+your\s+door\b)'
+)
+
+
+def _delivery_proof_message(row: dict[str, Any]) -> bool:
+    """Only proof-photo context or a courier's actually completed delivery."""
+    subject = str(row.get('subject') or '')
+    body = str(row.get('body') or '')[:4000]
+    sender = str(row.get('from') or '')
+    evidence = f'{subject}\n{body}'
+    if _POD_WORDS.search(evidence):
+        return True
+    return bool(_COURIER_SENDER.search(sender)
+                and _DELIVERED_EVENT.search(subject + '\n' + body[:1200]))
+
+
+def _delivery_photo_urls(records: list[dict[str, Any]]) -> list[str]:
+    """Keep image-level provenance: never mark all order photos by status."""
+    urls: list[str] = []
+    for row in records:
+        if not _delivery_proof_message(row):
+            continue
+        for u in row.get('remoteImages') or []:
+            value = str(u or '').strip()
+            if value and value not in urls:
+                urls.append(value)
+        for image in row.get('attachmentImages') or []:
+            value = str(image.get('url') or '').strip()
+            if value and value not in urls:
+                urls.append(value)
+    return urls
+
+
 def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
     # Keep the phone fast: eliminate unmistakable tracking/social assets before
     # any download, then prepare the remaining remote images concurrently.
@@ -215,6 +260,7 @@ def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
         if len(remote_urls) >= 40:
             break
 
+    delivery_urls = set(result.get('deliveryPhotoUrls') or [])
     remote_rows: list[dict[str, Any]] = []
     workers = max(1, min(10, len(remote_urls)))
     if remote_urls:
@@ -234,6 +280,7 @@ def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
                 except Exception:
                     # A slow/broken CDN image must never block the reconstruction.
                     pass
+                row['deliveryProofHint'] = url in delivery_urls
                 prepared_by_url[url] = row
             # Preserve Gmail order even though downloads completed in parallel.
             remote_rows = [prepared_by_url[url] for url in remote_urls if url in prepared_by_url]
@@ -262,6 +309,7 @@ def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         seen.add(url)
         row['kind'] = 'attachment'
+        row['deliveryProofHint'] = url in delivery_urls
         row['originalUrl'] = url
         name = Path(str(row.get('name') or Path(url).name)).name
         path = MEDIA_DIR / name
@@ -856,6 +904,7 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         'currency': 'USD',
         'items': items(combined),
         'emailPhotoUrls': urls[:60],
+        'deliveryPhotoUrls': _delivery_photo_urls(records),
         'emailAttachmentImages': attachments[:60],
         'emailSubjects': [str(r.get('subject') or '') for r in records if r.get('subject')],
         'emailFrom': [str(r.get('from') or '') for r in records if r.get('from')],
