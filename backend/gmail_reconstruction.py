@@ -225,6 +225,11 @@ def _delivery_proof_message(row: dict[str, Any]) -> bool:
     evidence = f'{subject}\n{body}'
     if _POD_WORDS.search(evidence):
         return True
+    # "Out for delivery"/"not yet delivered" are not photographic proof.
+    if re.search(r'(?i)\b(?:out\s+for\s+delivery|not\s+yet\s+delivered|'
+                 r'will\s+be\s+delivered|expected\s+to\s+be\s+delivered)\b',
+                 subject + '\n' + body[:250]):
+        return False
     return bool(_COURIER_SENDER.search(sender)
                 and _DELIVERED_EVENT.search(subject + '\n' + body[:1200]))
 
