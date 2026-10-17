@@ -136,9 +136,11 @@ def order_number(text: str, preferred: str = '') -> str:
         r'(?im)\border(?:\s+number|\s+no\.?|\s+#|\s+id)?\s*[:#-]?\s*([A-Z0-9-]{5,40})',
         r'(?im)\bpedido(?:\s+n[uú]mero|\s+no\.?|\s+#)?\s*[:#-]?\s*([A-Z0-9-]{5,40})',
     ]:
-        match = re.search(pattern, text)
-        if match:
-            return match.group(1).strip()
+        for match in re.finditer(pattern, text):
+            candidate = match.group(1).strip()
+            compact = re.sub(r'[^A-Z0-9]', '', candidate.upper())
+            if len(compact) >= 6 and any(ch.isdigit() for ch in compact):
+                return candidate
     return ''
 
 
@@ -163,7 +165,12 @@ def estimated_delivery(text: str) -> str:
         r'(?im)(?:estimated delivery|arriving|delivery date|entrega estimada|llega)\s*[:\-]?\s*([^\n]{3,45})',
         text,
     )
-    return match.group(1).strip(' .') if match else ''
+    if not match:
+        return ''
+    value = match.group(1).strip(' .')
+    if re.fullmatch(r'(?i)soon|shortly|pending|unknown|TBD', value):
+        return ''
+    return value
 
 
 def ship_to(text: str) -> str:
