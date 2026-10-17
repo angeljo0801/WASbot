@@ -302,6 +302,19 @@ def _run_reconstruction_job(job_id: str, order: str, tracking: str, client_id: s
         logger.info('Gmail job search finished jobId=%s found=%s accounts=%s',
                     job_id, result.get('found'), len(result.get('accountsSearched') or []))
         result['emailPhotoCandidates'] = _prepare_media_candidates(result) if result.get('found') else []
+        result['photoDiagnostics'] = {
+            'emails': len(result.get('messageIds') or []),
+            'remoteImages': len(result.get('emailPhotoUrls') or []),
+            'attachments': len(result.get('emailAttachmentImages') or []),
+            'candidates': len(result['emailPhotoCandidates']),
+        }
+        logger.info(
+            'Gmail image extraction jobId=%s emails=%s remote=%s attachments=%s candidates=%s',
+            job_id, result['photoDiagnostics']['emails'],
+            result['photoDiagnostics']['remoteImages'],
+            result['photoDiagnostics']['attachments'],
+            result['photoDiagnostics']['candidates'],
+        )
         logger.info('Gmail job finished jobId=%s', job_id)
         completed = datetime.now(timezone.utc).isoformat()
         _write_job(job_id, {
@@ -457,6 +470,7 @@ def record(message: dict[str, Any], token: str, account_id: int, source_email: s
         image['sourceEmail'] = source_email
     return {
         'id': str(message.get('id') or ''),
+        'threadId': str(message.get('threadId') or ''),
         'accountId': account_id,
         'sourceEmail': source_email,
         'internalDate': int(message.get('internalDate') or 0),
@@ -641,6 +655,108 @@ def search_account(account_id: int, source_email: str, token: str, seed: str) ->
     return list(records.values())
 
 
+def _order_reference_for_related_messages(rows: list[dict[str, Any]]) -> str:
+    """Never treat status words such as 'shipped' as an order identifier."""
+    for row in rows:
+        candidate = order_number(
+            str(row.get('subject') or '') + '\n' +
+            str(row.get('body') or '') + '\n' +
+            '\n'.join(str(x) for x in row.get('linkTargets') or []),
+        ).strip()
+        compact = re.sub(r'[^A-Za-z0-9]', '', candidate)
+        if 8 <= len(compact) <= 40 and sum(c.isdigit() for c in compact) >= 4:
+            return candidate
+    return ''
+
+
+def _merchant_family(sender: str) -> str:
+    lower = sender.lower()
+    for name in ('temu', 'shein', 'amazon', 'walmart', 'aliexpress', 'ebay'):
+        if name in lower:
+            return name
+    return ''
+
+
+def _related_purchase_records(
+    matched: list[dict[str, Any]], token: str, account_id: int, source_email: str,
+) -> list[dict[str, Any]]:
+    """Add related purchase receipts without claiming unrelated mail is a match.
+
+    Only mail in an exact-match Gmail thread, or verified to contain the same
+    real order reference from the same retailer, is eligible. Uses the SAME
+    account token and never scans mailboxes belonging to other clients.
+    """
+    if not matched:
+        return []
+    related: dict[str, dict[str, Any]] = {}
+    existing = {str(row.get('id') or '') for row in matched}
+    family = next(
+        (_merchant_family(str(r.get('from') or '')) for r in matched
+         if _merchant_family(str(r.get('from') or ''))), '',
+    )
+
+    for thread_id in list(dict.fromkeys(
+        str(r.get('threadId') or '') for r in matched
+        if str(r.get('threadId') or '').strip()
+    ))[:5]:
+        try:
+            thread = gmail_json(
+                'threads/' + urllib.parse.quote(thread_id) + '?format=full',
+                token,
+            )
+            for msg in (thread.get('messages') or [])[:18]:
+                message_id = str(msg.get('id') or '')
+                if not message_id or message_id in existing:
+                    continue
+                if str(msg.get('threadId') or '') != thread_id:
+                    continue
+                candidate = record(msg, token, account_id, source_email)
+                if family and _merchant_family(str(candidate.get('from') or '')) != family:
+                    continue
+                related[message_id] = candidate
+                if len(related) >= 25:
+                    break
+        except Exception:
+            # A thread retrieval is a best-effort enhancement, not a Gmail
+            # failure that can hide valid tracking matches.
+            continue
+
+    reference = _order_reference_for_related_messages(matched)
+    if reference:
+        try:
+            listing = gmail_json('messages?' + urllib.parse.urlencode({
+                'q': '"' + reference.replace('"', '') + '"',
+                'maxResults': '15',
+                'includeSpamTrash': 'true',
+            }), token)
+            for entry in (listing.get('messages') or [])[:15]:
+                message_id = str(entry.get('id') or '')
+                if not message_id or message_id in existing or message_id in related:
+                    continue
+                try:
+                    msg = gmail_json(
+                        'messages/' + urllib.parse.quote(message_id) + '?format=full',
+                        token,
+                    )
+                    if not _message_contains_identifier(msg, reference):
+                        continue
+                    candidate = record(msg, token, account_id, source_email)
+                    if family and _merchant_family(str(candidate.get('from') or '')) != family:
+                        continue
+                    related[message_id] = candidate
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    logger.info(
+        'Gmail related-order expansion accountId=%s matching=%s added=%s '
+        'hasVerifiedOrderRef=%s',
+        account_id, len(matched), len(related), bool(reference),
+    )
+    return list(related.values())
+
+
 def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dict[str, Any]:
     # Never use a storefront label from the optional order field instead of tracking.
     seed = tracking.strip() or order.strip()
@@ -669,6 +785,15 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
             except Exception as exc:
                 detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
                 account_errors.append({'accountId': account_id, 'email': email, 'error': str(detail)})
+
+    # Exact tracking search often finds only Temu/GOFO delivery notices;
+    # merchandise photos may be in the earlier order-confirmation message.
+    # Limit enrichment to the same mailbox and a proven shared thread/order.
+    if records:
+        for account_id, email, token in accounts:
+            matched = [r for r in records if int(r.get('accountId') or 0) == account_id]
+            if matched:
+                records.extend(_related_purchase_records(matched, token, account_id, email))
 
     if account_errors and not records:
         raise HTTPException(
