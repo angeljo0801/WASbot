@@ -810,6 +810,76 @@ def _related_purchase_records(
     return list(related.values())
 
 
+
+def _shein_predelivery_notice(row: dict[str, Any]) -> bool:
+    """SHEIN's pre-delivery notification contains the purchased-item photos."""
+    subject = str(row.get('subject') or '').casefold()
+    # Spanish accents and Gmail's translation can vary.
+    subject = (subject.replace('ó', 'o').replace('í', 'i')
+              .replace('á', 'a').replace('é', 'e'))
+    return (
+        ('notificacion' in subject and 'previa' in subject
+         and 'entrega' in subject)
+        or ('pre-delivery' in subject and 'notification' in subject)
+        or ('before delivery' in subject and 'shein' in subject)
+    )
+
+
+def _rank_product_photo_messages(
+    records: list[dict[str, Any]], merchant: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """Prefer store-specific product emails but retain all verified fallbacks.
+
+    Caller already verified tracking or the same order/thread within an account.
+    Never select by merely matching the brand anywhere in an unrelated message.
+    """
+    rows = [r for r in records
+            if r.get('remoteImages') or r.get('attachmentImages')]
+    recent = sorted(rows, key=lambda r: int(r.get('internalDate') or 0),
+                    reverse=True)
+    key = merchant.strip().lower()
+    if key not in {'shein', 'temu'}:
+        return recent, 'recent_first'
+
+    # Courier photo proofs, even when they contain a brand in the body, are
+    # not merchandise sources. Nor is an order-wide delivered status.
+    storefront = [
+        r for r in rows
+        if _merchant_family(str(r.get('from') or '')) == key
+        and not _delivery_proof_message(r)
+    ]
+    if not storefront:
+        return recent, 'recent_first_fallback'
+
+    if key == 'shein':
+        # Priority 1: the PRE-delivery email in the screenshot.
+        # Priority 2: the earliest SHEIN email that actually contains images.
+        prioritized = sorted(
+            storefront,
+            key=lambda r: (
+                0 if _shein_predelivery_notice(r) else 1,
+                int(r.get('internalDate') or 0),
+            ),
+        )
+        rule = 'shein_predelivery_first'
+    else:
+        # Temu: prefer the LAST/NEWEST purchase email (not courier POD).
+        prioritized = sorted(
+            storefront, key=lambda r: int(r.get('internalDate') or 0),
+            reverse=True,
+        )
+        rule = 'temu_latest_first'
+
+    used = {(int(r.get('accountId') or 0), str(r.get('id') or ''))
+            for r in prioritized}
+    # Failed image URLs or OCR can be rescued from other verified messages.
+    remaining = [
+        r for r in recent
+        if (int(r.get('accountId') or 0), str(r.get('id') or '')) not in used
+    ]
+    return prioritized + remaining, rule
+
+
 def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dict[str, Any]:
     # Never use a storefront label from the optional order field instead of tracking.
     seed = tracking.strip() or order.strip()
@@ -875,6 +945,11 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         if carrier not in carriers:
             carriers.append(carrier)
 
+    # Keep chronology of verified emails for metadata, but prioritize
+    # product-photo messages by retailer and email type for image selection.
+    photo_rows, photo_rule = _rank_product_photo_messages(
+        records, store_name(records),
+    )
     urls: list[str] = []
     attachments: list[dict[str, Any]] = []
     source_emails: list[str] = []
@@ -882,6 +957,7 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         source_email = str(row.get('sourceEmail') or '')
         if source_email and source_email not in source_emails:
             source_emails.append(source_email)
+    for row in photo_rows:
         for url in row.get('remoteImages') or []:
             if url not in urls:
                 urls.append(url)
@@ -908,6 +984,7 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         'total': money_field(combined, ['order total', 'grand total', 'total', 'total del pedido']),
         'currency': 'USD',
         'items': items(combined),
+        'photoSourceRule': photo_rule,
         'emailPhotoUrls': urls[:60],
         'deliveryPhotoUrls': _delivery_photo_urls(records),
         'emailAttachmentImages': attachments[:60],
