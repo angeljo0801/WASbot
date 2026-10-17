@@ -14,6 +14,7 @@ nodes = [x for x in tree.body if isinstance(x, ast.FunctionDef) and x.name in wa
 assert len(nodes) == len(wanted)
 scope = {
     "re": re,
+    "Any": object,
     "_POD_WORDS": re.compile(
         r"(?i)(?:proof\s+of\s+delivery|delivery\s+(?:photos?|pictures?|images?)|"
         r"(?:photos?|pictures?|images?)\s+(?:of|from)\s+(?:your|the)\s+delivery|"
