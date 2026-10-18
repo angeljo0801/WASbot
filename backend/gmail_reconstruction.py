@@ -930,15 +930,14 @@ def _select_primary_product_photo_source(
 
     if key == 'temu':
         # STRICT merchant selection: choose the MOST RECENT verified Temu
-        # message with image references, regardless of whether its sender uses
-        # the normal Temu address or an alternate order-notification address.
-        # Do not fall back to an older Temu email when thumbnails are unavailable
-        # (that produced photos from the wrong purchase).
-        # Tracking/order/thread validation was already performed by reconstruct().
+        # MESSAGE, not the most recent one with usable pictures. A newer email
+        # with no images is still authoritative: NEVER use an older receipt's
+        # merchandise just because the newer message has broken/zero images.
+        # Sender aliases with Temu in the subject are accepted only from the
+        # already verified tracking/order/thread set provided by reconstruct().
         candidates = [
             row for row in records
-            if (row.get('remoteImages') or row.get('attachmentImages'))
-            and not _delivery_proof_message(row)
+            if not _delivery_proof_message(row)
             and (
                 _merchant_family(str(row.get('from') or '')) == 'temu'
                 or (
@@ -1097,6 +1096,19 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         records, merchant,
     )
     urls, attachments = _source_photo_fields(photo_rows)
+    selected_photo_row = photo_rows[0] if len(photo_rows) == 1 else {}
+    if merchant.strip().lower() == 'temu':
+        # Report only aggregate selection diagnostics, no private email body,
+        # subject, address or message id in logs.
+        logger.info(
+            'Temu Gmail selected latest email: verified=%s chosenDate=%s '
+            'hasImages=%s selectedEmails=%s candidateEmails=%s',
+            bool(photo_rows),
+            selected_photo_row.get('internalDate', 0),
+            bool(urls or attachments),
+            len(photo_rows),
+            len(records),
+        )
     source_emails: list[str] = []
     for row in reversed(records):
         source_email = str(row.get('sourceEmail') or '')
@@ -1131,6 +1143,8 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         'photoSourceMessageId': (
             str(photo_rows[0].get('id') or '') if len(photo_rows) == 1 else ''
         ),
+        'photoSourceDate': str(selected_photo_row.get('date') or ''),
+        'photoSourceInternalDate': int(selected_photo_row.get('internalDate') or 0),
         # Never expose these alternative images as normal photo candidates.
         # They are considered only if the primary email yielded zero images.
         '_photoFallbackGroups': [
