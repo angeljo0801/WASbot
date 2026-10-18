@@ -114,6 +114,22 @@ other_rows, backup, rule = select(shein, 'Amazon')
 assert [m['id'] for m in other_rows] == ['shein-newer', 'shein-pre', 'shein-order']
 assert rule == 'all_verified_emails'
 
+# Store mail via alternate sender still supplies product photos when the
+# verified tracking/order subject identifies the retailer.
+alternate = mail('shein-alias', 'Order Updates', 700,
+                 'SHEIN order details for your shipment', ['watch_from_alias.jpg'])
+primary, backup, rule = select([alternate], 'SHEIN')
+assert [m['id'] for m in primary] == ['shein-alias']
+assert rule == 'shein_subject_photo_fallback'
+assert fields(primary)[0] == ['watch_from_alias.jpg']
+# Do not accidentally accept another merchant or delivery-proof photo.
+unrelated = mail('other', 'Order Updates', 705, 'Temu special offer', ['other.jpg'])
+primary, _, rule = select([unrelated], 'SHEIN')
+assert primary == [] and rule == 'shein_no_store_photo'
+proof = mail('proof', 'Order Updates', 710, 'SHEIN delivery photo', ['porch.jpg'], is_proof=True)
+primary, _, rule = select([proof], 'SHEIN')
+assert primary == [] and rule == 'shein_no_store_photo'
+
 assert "'photoSourceRule': photo_rule" in code
 
 assert "'emailPhotoUrls': urls[:60]" in code
