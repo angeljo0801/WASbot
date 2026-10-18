@@ -168,7 +168,11 @@ def _cache_remote_image(url: str) -> dict[str, Any]:
         width, height = _image_dimensions(existing)
         return {
             'url': f'/api/gmail/media/{existing.name}',
-            'thumbnailUrl': _thumbnail_for(existing, digest),
+            # Identical photo bytes can have different Temu CDN query URLs.
+            # Thumbnails must be addressed by IMAGE CONTENT, not URL hash.
+            'thumbnailUrl': _thumbnail_for(
+                existing, hashlib.sha256(existing.read_bytes()).hexdigest()[:28],
+            ),
             'originalUrl': url,
             'width': width,
             'height': height,
@@ -194,7 +198,9 @@ def _cache_remote_image(url: str) -> dict[str, Any]:
     width, height = _image_dimensions(path)
     return {
         'url': f'/api/gmail/media/{name}',
-        'thumbnailUrl': _thumbnail_for(path, digest),
+        'thumbnailUrl': _thumbnail_for(
+            path, hashlib.sha256(data).hexdigest()[:28],
+        ),
         'originalUrl': url,
         'width': width,
         'height': height,
