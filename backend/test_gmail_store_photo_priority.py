@@ -10,11 +10,13 @@ from typing import Any
 code = Path(__file__).with_name('gmail_reconstruction.py').read_text(encoding='utf-8')
 tree = ast.parse(code)
 wanted = {'_shein_predelivery_notice', '_rank_product_photo_messages',
-          '_select_primary_product_photo_source', '_source_photo_fields'}
+          '_select_primary_product_photo_source', '_source_photo_fields',
+          '_photo_merchant_from_verified_records'}
 nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
-assert len(nodes) == 4
+assert len(nodes) == 5
 scope = {
     'Any': Any,
+    'store_name': lambda rows: 'Amazon',  # Mimic misleading body-text detection.
     're': re,
     '_merchant_family': lambda sender: next(
         (x for x in ('shein', 'temu') if x in sender.lower()), ''
@@ -28,6 +30,7 @@ rank = scope['_rank_product_photo_messages']
 select = scope['_select_primary_product_photo_source']
 fields = scope['_source_photo_fields']
 pre = scope['_shein_predelivery_notice']
+merchant = scope['_photo_merchant_from_verified_records']
 
 def mail(key, shop, date, subject, images=None, is_proof=False):
     return {
@@ -190,6 +193,23 @@ primary, backup, rule = select([*temu, mixed_newest, courier_new], 'Temu')
 assert [m['id'] for m in primary] == ['temu-newest-alt']
 assert backup == []
 
+
+# A Temu email might mention "Amazon" inside a promotional footer.
+# Store identity must come from actual Temu sender or verified subject.
+confirmed_temu = mail('new-temu', 'Temu', 1800, 'Temu order update',
+                       ['temu_latest_item.jpg'])
+confirmed_temu['body'] = 'Other brands include Amazon Walmart and SHEIN.'
+assert merchant([confirmed_temu]) == 'Temu'
+assert select([confirmed_temu], merchant([confirmed_temu]))[0][0]['id'] == 'new-temu'
+alias_temu = mail('new-temu-alias', 'Order Updates', 1900,
+                  'Temu order update', ['alias_item.jpg'])
+alias_temu['body'] = 'Amazon Walmart footer'
+assert merchant([alias_temu]) == 'Temu'
+# Do not infer Temu only because a courier writes it in the delivery body.
+carrier_brand = mail('courier-brand', 'GOFO', 2000, 'Delivered',
+                     ['porch.jpg'], is_proof=True)
+carrier_brand['body'] = 'Temu package delivered'
+assert merchant([carrier_brand]) != 'Temu'
 
 # Do not accidentally accept another merchant or delivery-proof photo.
 unrelated = mail('other', 'Order Updates', 705, 'Temu special offer', ['other.jpg'])
