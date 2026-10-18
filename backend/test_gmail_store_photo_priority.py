@@ -15,6 +15,7 @@ nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wa
 assert len(nodes) == 4
 scope = {
     'Any': Any,
+    're': re,
     '_merchant_family': lambda sender: next(
         (x for x in ('shein', 'temu') if x in sender.lower()), ''
     ),
@@ -101,7 +102,7 @@ assert fields(primary) == (['dress.jpg'], [])
 primary, backup, rule = select(temu, 'Temu')
 assert rule == 'temu_latest_first'
 assert [m['id'] for m in primary] == ['temu-last']
-assert [m['id'] for m in backup] == ['temu-old']
+assert backup == [], 'Temu must not fall back to an old order email'
 assert fields(primary) == (['latest_product.jpg'], [])
 
 # Multiple photos in the one selected message are allowed, but the same
@@ -113,13 +114,13 @@ repeated = [
 ]
 primary, backup, rule = select(repeated, 'Temu')
 assert [m['id'] for m in primary] == ['temu-two']
-assert [m['id'] for m in backup] == ['temu-last', 'temu-old']
+assert backup == [], 'No older Temu email fallback'
 assert fields(primary) == (['latest_product.jpg', 'another.jpg'], [])
 
-# Missing/broken photos may use the NEXT email as an entire replacement
-# (not a union of the first and second messages).
-assert fields(backup[:1]) == (['latest_product.jpg'], [])
-assert fields(primary + backup[-1:]) != fields(primary)
+# Do not replace a newer Temu email with an older one when its CDN is broken.
+# The job handler will return zero prepared images, never silently use old ones.
+assert backup == []
+assert "and not str(result.get('photoSourceRule') or '').startswith('temu_')" in code
 
 only_courier = [m for m in temu if m['id'] in ('temu-pod', 'carrier')]
 primary, backup, rule = select(only_courier, 'Temu')
@@ -158,7 +159,25 @@ alias_temu_new = mail('temu-alias-new', 'Order Updates', 200,
                       'Temu shipped', ['new_alias_temu.jpg'])
 primary, backup, rule = select([alias_temu_early, alias_temu_new], 'Temu')
 assert [m['id'] for m in primary] == ['temu-alias-new']
-assert [m['id'] for m in backup] == ['temu-alias-old']
+assert backup == []
+
+# The newest email may be an order update from an alternative Temu sender,
+# even when earlier emails have a normal @temu.com domain.
+mixed_newest = mail('temu-newest-alt', 'Order Updates', 900,
+                    'Temu items in your order', ['correct_newest.jpg'])
+primary, backup, rule = select([*temu, mixed_newest], 'Temu')
+assert [m['id'] for m in primary] == ['temu-newest-alt']
+assert backup == []
+assert fields(primary)[0] == ['correct_newest.jpg']
+assert rule == 'temu_latest_first'
+
+# A newer courier POD never outranks the merchant's newest item email.
+courier_new = mail('courier-new', 'GOFO', 1200,
+                   'Delivered - Temu order', ['front_porch.jpg'], is_proof=True)
+primary, backup, rule = select([*temu, mixed_newest, courier_new], 'Temu')
+assert [m['id'] for m in primary] == ['temu-newest-alt']
+assert backup == []
+
 
 # Do not accidentally accept another merchant or delivery-proof photo.
 unrelated = mail('other', 'Order Updates', 705, 'Temu special offer', ['other.jpg'])
@@ -172,6 +191,7 @@ assert "'photoSourceRule': photo_rule" in code
 assert "'photoSearchScope': (" in code
 assert "'single_priority_email'" in code
 assert "'photoSourceMessageId':" in code
+assert "[],  # Critical: NO older-email image fallback for Temu." in code
 
 assert "'emailPhotoUrls': urls[:60]" in code
-print('SHEIN/Temu exact one-email priority, isolated fallbacks and courier exclusion passed.')
+print('SHEIN prioritizes pre-delivery; Temu newest only with no older fallback, including alternate sender.')
