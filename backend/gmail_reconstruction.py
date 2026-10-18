@@ -369,10 +369,10 @@ def _run_reconstruction_job(job_id: str, order: str, tracking: str, client_id: s
         logger.info('Gmail job search finished jobId=%s found=%s accounts=%s',
                     job_id, result.get('found'), len(result.get('accountsSearched') or []))
         result['emailPhotoCandidates'] = _prepare_media_candidates(result) if result.get('found') else []
-        # If the selected storefront email has no usable images (e.g. all
-        # broken URLs/logos), retry ONE other verified storefront message,
-        # never combine its photos with the original or courier proof.
-        if result.get('found') and not result['emailPhotoCandidates']:
+        # SHEIN may use its earlier alternative only when necessary. Temu
+        # must NEVER switch to old emails; keep only its latest mail.
+        if (result.get('found') and not result['emailPhotoCandidates']
+                and not str(result.get('photoSourceRule') or '').startswith('temu_')):
             for fallback in result.pop('_photoFallbackGroups', []):
                 candidate = {
                     **result,
@@ -387,8 +387,8 @@ def _run_reconstruction_job(job_id: str, order: str, tracking: str, client_id: s
                     result['photoSourceRule'] += '_fallback'
                     result['photoSourceMessageId'] = fallback['messageId']
                     break
-        else:
-            result.pop('_photoFallbackGroups', None)
+        # Never persist fallback options inside completed Gmail job results.
+        result.pop('_photoFallbackGroups', None)
         result['photoDiagnostics'] = {
             'emails': len(result.get('messageIds') or []),
             'remoteImages': len(result.get('emailPhotoUrls') or []),
@@ -927,6 +927,38 @@ def _select_primary_product_photo_source(
     """
     ranked, rule = _rank_product_photo_messages(records, merchant)
     key = merchant.strip().lower()
+
+    if key == 'temu':
+        # STRICT merchant selection: choose the MOST RECENT verified Temu
+        # message with image references, regardless of whether its sender uses
+        # the normal Temu address or an alternate order-notification address.
+        # Do not fall back to an older Temu email when thumbnails are unavailable
+        # (that produced photos from the wrong purchase).
+        # Tracking/order/thread validation was already performed by reconstruct().
+        candidates = [
+            row for row in records
+            if (row.get('remoteImages') or row.get('attachmentImages'))
+            and not _delivery_proof_message(row)
+            and (
+                _merchant_family(str(row.get('from') or '')) == 'temu'
+                or (
+                    _merchant_family(str(row.get('from') or '')) == ''
+                    and re.search(r'\btemu\b',
+                                  str(row.get('subject') or ''),
+                                  flags=re.IGNORECASE)
+                )
+            )
+        ]
+        candidates.sort(
+            key=lambda row: int(row.get('internalDate') or 0),
+            reverse=True,
+        )
+        return (
+            candidates[:1],
+            [],  # Critical: NO older-email image fallback for Temu.
+            'temu_latest_first' if candidates else 'temu_no_store_photo',
+        )
+
     if key not in {'shein', 'temu'}:
         # Avoid courier delivery-proof photos, even for other shops.
         valid = [r for r in ranked if not _delivery_proof_message(r)]
