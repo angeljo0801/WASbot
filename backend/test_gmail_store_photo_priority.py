@@ -18,6 +18,7 @@ scope = {
     'Any': Any,
     'store_name': lambda rows: 'Amazon',  # Mimic misleading body-text detection.
     're': re,
+    '_COURIER_SENDER': re.compile(r'(?i)(?:gofo|speedx|fedex|ontrac|ups\.com|usps|dhl)'),
     '_merchant_family': lambda sender: next(
         (x for x in ('shein', 'temu') if x in sender.lower()), ''
     ),
@@ -64,7 +65,10 @@ assert rule == 'shein_predelivery_first'
 temu = [
     mail('temu-old', 'Temu', 100, 'Order confirmed', ['older_product.jpg']),
     mail('temu-last', 'Temu', 300, 'Your order has shipped', ['latest_product.jpg']),
-    mail('temu-pod', 'Temu', 400, 'Proof of delivery', ['house.jpg'], is_proof=True),
+    # Real Sep 25 Temu email: delivery pictures AND the product in Package info.
+    mail('temu-pod', 'Temu', 400, 'Your Temu order delivered notification',
+         ['house.jpg', 'doorstep.jpg', 'tracking_label.jpg', 'shirt.jpg'],
+         is_proof=True),
     mail('carrier', 'GOFO', 500, 'Delivered', ['address.jpg'], is_proof=True),
     mail('other-shop', 'SHEIN', 600, 'A different shop', ['unrelated.jpg']),
 ]
@@ -101,12 +105,16 @@ assert [m['id'] for m in primary] == ['shein-order']
 assert [m['id'] for m in backup] == ['shein-newer']
 assert fields(primary) == (['dress.jpg'], [])
 
-# Temu: ONLY the newest merchant mail, not POD or older receipts.
+# The latest Temu email is an official delivery confirmation. Unlike a GOFO
+# courier notice, it INCLUDES the real shirt in its "Package info" section.
+# Retain all photos within THIS ONE email, never photos from previous receipts.
 primary, backup, rule = select(temu, 'Temu')
 assert rule == 'temu_latest_first'
-assert [m['id'] for m in primary] == ['temu-last']
+assert [m['id'] for m in primary] == ['temu-pod']
 assert backup == [], 'Temu must not fall back to an old order email'
-assert fields(primary) == (['latest_product.jpg'], [])
+assert fields(primary) == (
+    ['house.jpg', 'doorstep.jpg', 'tracking_label.jpg', 'shirt.jpg'], []
+)
 
 # Multiple photos in the one selected message are allowed, but the same
 # photo in older emails must not cause them to be mixed together.
@@ -125,10 +133,16 @@ assert fields(primary) == (['latest_product.jpg', 'another.jpg'], [])
 assert backup == []
 assert "and not str(result.get('photoSourceRule') or '').startswith('temu_')" in code
 
-only_courier = [m for m in temu if m['id'] in ('temu-pod', 'carrier')]
+only_courier = [m for m in temu if m['id'] == 'carrier']
 primary, backup, rule = select(only_courier, 'Temu')
 assert primary == [] and backup == []
 assert rule == 'temu_no_store_photo'
+
+# A Temu sender with delivery pictures is NOT a courier notification.
+primary, backup, rule = select([temu[2], temu[3]], 'Temu')
+assert [m['id'] for m in primary] == ['temu-pod']
+assert backup == []
+assert fields(primary)[0][-1] == 'shirt.jpg'
 
 other_rows, backup, rule = select(shein, 'Amazon')
 assert [m['id'] for m in other_rows] == ['shein-newer', 'shein-pre', 'shein-order']
@@ -186,7 +200,7 @@ assert backup == []
 assert fields(primary) == ([], [])
 assert rule == 'temu_latest_first'
 
-# A newer courier POD never outranks the merchant's newest item email.
+# A later courier notice cannot outrank the Temu delivery message.
 courier_new = mail('courier-new', 'GOFO', 1200,
                    'Delivered - Temu order', ['front_porch.jpg'], is_proof=True)
 primary, backup, rule = select([*temu, mixed_newest, courier_new], 'Temu')
@@ -210,6 +224,11 @@ carrier_brand = mail('courier-brand', 'GOFO', 2000, 'Delivered',
                      ['porch.jpg'], is_proof=True)
 carrier_brand['body'] = 'Temu package delivered'
 assert merchant([carrier_brand]) != 'Temu'
+
+# Regression: marking every image inside a Temu delivery notice as courier
+# proof would reject the purchased shirt even after selecting the right email.
+assert "merchant.lower() != 'temu'" in code
+assert "_COURIER_SENDER.search(str(row.get('from') or ''))" in code
 
 # Do not accidentally accept another merchant or delivery-proof photo.
 unrelated = mail('other', 'Order Updates', 705, 'Temu special offer', ['other.jpg'])
