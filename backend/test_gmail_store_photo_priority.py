@@ -82,39 +82,39 @@ ranked, rule = rank([x for x in temu if x['id'] != 'temu-last'], 'Temu')
 assert ranked[0]['id'] == 'temu-old'
 
 
-# Priority is not enough: only the CHOSEN email may supply photographs.
-# All related messages remain useful for order metadata, but must NOT
-# contribute their images to this list unless the source has zero usable media.
-primary, backup, rule = select(shein, 'SHEIN')
+# Every verified email from the same order must supply eligible pictures.
+# Merchant priority affects ORDER only, not completeness. Courier PODs and
+# other shops are excluded even if their emails were searched.
+all_rows, backup, rule = select(shein, 'SHEIN')
 assert rule == 'shein_predelivery_first'
-assert [m['id'] for m in primary] == ['shein-pre']
-assert [m['id'] for m in backup] == ['shein-order', 'shein-newer']
-assert fields(primary) == (['watch.jpg'], []), fields(primary)
+assert [m['id'] for m in all_rows] == ['shein-pre', 'shein-order', 'shein-newer']
+assert backup == []
+assert fields(all_rows) == (['watch.jpg', 'dress.jpg', 'ad.jpg'], [])
 
-primary, backup, rule = select(temu, 'Temu')
+all_rows, backup, rule = select(temu, 'Temu')
 assert rule == 'temu_latest_first'
-assert [m['id'] for m in primary] == ['temu-last']
-assert [m['id'] for m in backup] == ['temu-old']
-assert fields(primary) == (['latest_product.jpg'], []), fields(primary)
+assert [m['id'] for m in all_rows] == ['temu-last', 'temu-old']
+assert backup == []
+assert fields(all_rows) == (['latest_product.jpg', 'older_product.jpg'], [])
 
-# Never quietly use delivery-location images when no verified store email.
+# Same photo repeated in multiple purchase mails is added just once.
+repeated = [
+    mail('temu-two', 'Temu', 400, 'Your order details', ['latest_product.jpg', 'another.jpg']),
+    *temu,
+]
+selected, _, _ = select(repeated, 'Temu')
+assert fields(selected) == (['latest_product.jpg', 'another.jpg', 'older_product.jpg'], [])
+
 only_courier = [m for m in temu if m['id'] in ('temu-pod', 'carrier')]
 primary, backup, rule = select(only_courier, 'Temu')
 assert primary == [] and backup == []
 assert rule == 'temu_no_store_photo'
 
-# Unknown stores still use legacy source inclusion.
-primary, backup, rule = select(shein, 'Amazon')
-assert len(primary) == len(shein) and not backup
-
-# Fallback order remains available if (and only if) the first email
-# contains no usable images after thumbnailing/verification.
-single, rest, _ = select([m for m in temu if m['id'] != 'temu-last'], 'Temu')
-assert single[0]['id'] == 'temu-old' and rest == []
+other_rows, backup, rule = select(shein, 'Amazon')
+assert [m['id'] for m in other_rows] == ['shein-newer', 'shein-pre', 'shein-order']
+assert rule == 'all_verified_emails'
 
 assert "'photoSourceRule': photo_rule" in code
-assert "'_photoFallbackGroups': [" in code
-assert "if result.get('found') and not result['emailPhotoCandidates']:" in code
 
 assert "'emailPhotoUrls': urls[:60]" in code
-print('SHEIN/Temu strict single-source photo isolation and backup checks passed.')
+print('SHEIN/Temu all matched emails, safe sender selection and photo dedup passed.')
