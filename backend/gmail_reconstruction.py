@@ -262,7 +262,7 @@ def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         seen.add(url)
         remote_urls.append(url)
-        if len(remote_urls) >= 40:
+        if len(remote_urls) >= 80:
             break
 
     delivery_urls = set(result.get('deliveryPhotoUrls') or [])
@@ -300,7 +300,7 @@ def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
             if shortest < 70 or (shortest > 0 and longest / shortest > 6.5):
                 continue
         candidates.append(row)
-        if len(candidates) >= 20:
+        if len(candidates) >= 72:
             break
 
     # Gmail MIME attachments are already local on Railway, so thumbnailing them
@@ -332,10 +332,24 @@ def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
         else:
             row['thumbnailUrl'] = ''
         candidates.append(row)
-        if len(candidates) >= 24:
+        if len(candidates) >= 80:
             break
 
-    return candidates
+    # The same photo can appear in several order emails. Server thumbnails
+    # are named by content digest. Collapse them before sending to the app so
+    # the accepted gallery and the review inbox don't show duplicate copies.
+    unique_candidates: list[dict[str, Any]] = []
+    seen_photos: set[str] = set()
+    for row in candidates:
+        thumbnail = str(row.get('thumbnailUrl') or '').strip()
+        original = str(row.get('originalUrl') or row.get('url') or '').strip()
+        # Never conflate unrelated CDN URLs merely because of a shared name.
+        identity = ('thumb:' + thumbnail) if thumbnail else ('url:' + original)
+        if identity in seen_photos:
+            continue
+        seen_photos.add(identity)
+        unique_candidates.append(row)
+    return unique_candidates
 
 
 def _run_reconstruction_job(job_id: str, order: str, tracking: str, client_id: str = '') -> None:
@@ -902,31 +916,32 @@ def _rank_product_photo_messages(
 def _select_primary_product_photo_source(
     records: list[dict[str, Any]], merchant: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
-    """Never merge multiple SHEIN/Temu mail images in a single reconstruction.
+    """Collect photos from ALL verified order emails, in merchant preference order.
 
-    The prior 'ranking' implementation returned every email; iterating them
-    collected all their images despite the preferred date ordering.
-    Other retailers retain their previous behavior.
+    Records were already matched by tracking or by same mailbox plus verified
+    order/thread. Do not restrict the search to a single email; the app
+    decides which pictures show a product and which remain for review.
     """
     ranked, rule = _rank_product_photo_messages(records, merchant)
     key = merchant.strip().lower()
     if key not in {'shein', 'temu'}:
-        return ranked, [], rule
+        # Avoid courier delivery-proof photos, even for other shops.
+        valid = [r for r in ranked if not _delivery_proof_message(r)]
+        return valid, [], 'all_verified_emails'
 
-    matching_store = [
-        row for row in ranked
-        if _merchant_family(str(row.get('from') or '')) == key
-        and not _delivery_proof_message(row)
-        and (row.get('remoteImages') or row.get('attachmentImages'))
+    matches = [
+        r for r in ranked
+        if _merchant_family(str(r.get('from') or '')) == key
+        and not _delivery_proof_message(r)
+        and (r.get('remoteImages') or r.get('attachmentImages'))
     ]
-    if not matching_store:
-        # Only courier images or no authenticated storefront photos:
-        # keep the order match but do not pretend delivery proof is a product.
+    if not matches:
         return [], [], f'{key}_no_store_photo'
+    # Preferred email is FIRST, not ONLY. No courier POD, no other merchant,
+    # and no new unrelated inbox search.
+    return matches, [], rule
 
-    # Precisely ONE preferred source. Backup sources remain server-side and
-    # are consulted only if the preferred email yields no usable image.
-    return matching_store[:1], matching_store[1:], rule
+
 
 
 def _source_photo_fields(
@@ -1043,6 +1058,7 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         'items': items(combined),
         'photoSourceRule': photo_rule,
         'photoSourceMessageCount': len(photo_rows),
+        'photoSearchScope': 'all_verified_order_emails',
         # Never expose these alternative images as normal photo candidates.
         # They are considered only if the primary email yielded zero images.
         '_photoFallbackGroups': [
