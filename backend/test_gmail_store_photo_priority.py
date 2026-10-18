@@ -82,28 +82,44 @@ ranked, rule = rank([x for x in temu if x['id'] != 'temu-last'], 'Temu')
 assert ranked[0]['id'] == 'temu-old'
 
 
-# Every verified email from the same order must supply eligible pictures.
-# Merchant priority affects ORDER only, not completeness. Courier PODs and
-# other shops are excluded even if their emails were searched.
-all_rows, backup, rule = select(shein, 'SHEIN')
+# SHEIN: choose only its pre-delivery email. Do not combine its watch with
+# the dress/order confirmation or the newer promotional email.
+primary, backup, rule = select(shein, 'SHEIN')
 assert rule == 'shein_predelivery_first'
-assert [m['id'] for m in all_rows] == ['shein-pre', 'shein-order', 'shein-newer']
-assert backup == []
-assert fields(all_rows) == (['watch.jpg', 'dress.jpg', 'ad.jpg'], [])
+assert [m['id'] for m in primary] == ['shein-pre']
+assert [m['id'] for m in backup] == ['shein-order', 'shein-newer']
+assert fields(primary) == (['watch.jpg'], [])
+assert all('porch.jpg' not in fields([m])[0] for m in backup)
 
-all_rows, backup, rule = select(temu, 'Temu')
+# If no pre-delivery email exists, SHEIN uses its oldest email with images.
+primary, backup, rule = select([m for m in shein if m['id'] != 'shein-pre'], 'SHEIN')
+assert [m['id'] for m in primary] == ['shein-order']
+assert [m['id'] for m in backup] == ['shein-newer']
+assert fields(primary) == (['dress.jpg'], [])
+
+# Temu: ONLY the newest merchant mail, not POD or older receipts.
+primary, backup, rule = select(temu, 'Temu')
 assert rule == 'temu_latest_first'
-assert [m['id'] for m in all_rows] == ['temu-last', 'temu-old']
-assert backup == []
-assert fields(all_rows) == (['latest_product.jpg', 'older_product.jpg'], [])
+assert [m['id'] for m in primary] == ['temu-last']
+assert [m['id'] for m in backup] == ['temu-old']
+assert fields(primary) == (['latest_product.jpg'], [])
 
-# Same photo repeated in multiple purchase mails is added just once.
+# Multiple photos in the one selected message are allowed, but the same
+# photo in older emails must not cause them to be mixed together.
 repeated = [
-    mail('temu-two', 'Temu', 400, 'Your order details', ['latest_product.jpg', 'another.jpg']),
+    mail('temu-two', 'Temu', 400, 'Your order details',
+         ['latest_product.jpg', 'another.jpg']),
     *temu,
 ]
-selected, _, _ = select(repeated, 'Temu')
-assert fields(selected) == (['latest_product.jpg', 'another.jpg', 'older_product.jpg'], [])
+primary, backup, rule = select(repeated, 'Temu')
+assert [m['id'] for m in primary] == ['temu-two']
+assert [m['id'] for m in backup] == ['temu-last', 'temu-old']
+assert fields(primary) == (['latest_product.jpg', 'another.jpg'], [])
+
+# Missing/broken photos may use the NEXT email as an entire replacement
+# (not a union of the first and second messages).
+assert fields(backup[:1]) == (['latest_product.jpg'], [])
+assert fields(primary + backup[:1]) != fields(primary)
 
 only_courier = [m for m in temu if m['id'] in ('temu-pod', 'carrier')]
 primary, backup, rule = select(only_courier, 'Temu')
@@ -122,6 +138,28 @@ primary, backup, rule = select([alternate], 'SHEIN')
 assert [m['id'] for m in primary] == ['shein-alias']
 assert rule == 'shein_subject_photo_fallback'
 assert fields(primary)[0] == ['watch_from_alias.jpg']
+# Alternate sender respects SHEIN's pre-delivery / oldest preference as well.
+alias_new = mail('shein-alias-new', 'Order Updates', 900,
+                 'SHEIN shipment notice', ['newer_alias.jpg'])
+alias_pre = mail('shein-alias-pre', 'Order Updates', 800,
+                 'Notificación previa a la entrega de Pedido de SHEIN',
+                 ['watch_alias.jpg'])
+primary, backup, rule = select([alternate, alias_new, alias_pre], 'SHEIN')
+assert [m['id'] for m in primary] == ['shein-alias-pre']
+assert [m['id'] for m in backup] == ['shein-alias', 'shein-alias-new']
+assert fields(primary)[0] == ['watch_alias.jpg']
+primary, backup, rule = select([alternate, alias_new], 'SHEIN')
+assert [m['id'] for m in primary] == ['shein-alias']
+assert [m['id'] for m in backup] == ['shein-alias-new']
+
+alias_temu_early = mail('temu-alias-old', 'Order Updates', 100,
+                        'Temu order', ['old_alias_temu.jpg'])
+alias_temu_new = mail('temu-alias-new', 'Order Updates', 200,
+                      'Temu shipped', ['new_alias_temu.jpg'])
+primary, backup, rule = select([alias_temu_early, alias_temu_new], 'Temu')
+assert [m['id'] for m in primary] == ['temu-alias-new']
+assert [m['id'] for m in backup] == ['temu-alias-old']
+
 # Do not accidentally accept another merchant or delivery-proof photo.
 unrelated = mail('other', 'Order Updates', 705, 'Temu special offer', ['other.jpg'])
 primary, _, rule = select([unrelated], 'SHEIN')
@@ -131,6 +169,9 @@ primary, _, rule = select([proof], 'SHEIN')
 assert primary == [] and rule == 'shein_no_store_photo'
 
 assert "'photoSourceRule': photo_rule" in code
+assert "'photoSearchScope': (" in code
+assert "'single_priority_email'" in code
+assert "'photoSourceMessageId':" in code
 
 assert "'emailPhotoUrls': urls[:60]" in code
-print('SHEIN/Temu all matched emails, safe sender selection and photo dedup passed.')
+print('SHEIN/Temu exact one-email priority, isolated fallbacks and courier exclusion passed.')
