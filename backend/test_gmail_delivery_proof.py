@@ -40,7 +40,6 @@ evidence = scope["_delivery_photo_urls"]([
 assert evidence == ["https://example.com/door.jpg", "https://example.com/porch.jpg", "/api/gmail/media/dropoff.jpg"], evidence
 # Temu delivery email can contain both four delivery pictures and an actual
 # product photo. Never mark ALL images in that email as a non-product POD.
-assert '"deliveryProofHint"' not in ''  # no-op keeps stub independent
 assert "deliveryProofHint" in source
 assert "merchant.lower() != 'temu'" in source
 assert "_COURIER_SENDER.search(str(row.get('from') or ''))" in source
