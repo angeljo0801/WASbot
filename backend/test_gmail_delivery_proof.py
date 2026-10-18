@@ -40,6 +40,43 @@ evidence = scope["_delivery_photo_urls"]([
 assert evidence == ["https://example.com/door.jpg", "https://example.com/porch.jpg", "/api/gmail/media/dropoff.jpg"], evidence
 # Temu delivery email can contain both four delivery pictures and an actual
 # product photo. Never mark ALL images in that email as a non-product POD.
+# The real Temu email has 4 delivery images before "Package info" and
+# the bought shirt AFTER that heading. Verify that we classify per image.
+import html
+from gmail_parser import strip_html
+section_func = next(
+    node for node in tree.body
+    if isinstance(node, ast.FunctionDef)
+    and node.name == "_temu_delivery_section_photos"
+)
+photo_scope = {"re": re, "html": html, "strip_html": strip_html}
+exec(compile(ast.Module(body=[section_func], type_ignores=[]),
+             "temu_sections", "exec"), photo_scope)
+temu_mail_html = """
+<img src="https://example.com/temu_logo.png">
+<div>Your order was delivered</div>
+<img src="https://example.com/house.jpg">
+<img src="https://example.com/doorstep.jpg">
+<img src="https://example.com/address.jpg">
+<div>Package info</div>
+<img src="https://example.com/built_different_shirt.jpg">
+<div>Black / Label size: S &times;1</div>
+<div>Ship to:</div>
+<img src="https://example.com/track_shipping_icon.png">
+"""
+proof, products = photo_scope["_temu_delivery_section_photos"]([temu_mail_html])
+assert proof == [
+    "https://example.com/temu_logo.png",
+    "https://example.com/house.jpg",
+    "https://example.com/doorstep.jpg",
+    "https://example.com/address.jpg",
+], (proof, products)
+assert products == ["https://example.com/built_different_shirt.jpg"]
+assert photo_scope["_temu_delivery_section_photos"](
+    ['<img src="https://example.com/watch.jpg">']
+) == ([], [])
+assert "row['productRowHint'] = url in product_urls" in source
+assert "row['deliveryProofHint'] = url in delivery_urls" in source
 assert "deliveryProofHint" in source
 assert "merchant.lower() != 'temu'" in source
 assert "_COURIER_SENDER.search(str(row.get('from') or ''))" in source
