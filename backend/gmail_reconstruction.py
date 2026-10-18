@@ -936,6 +936,21 @@ def _select_primary_product_photo_source(
         and (r.get('remoteImages') or r.get('attachmentImages'))
     ]
     if not matches:
+        # Some SHEIN/Temu order receipts arrive through a forwarding/marketing
+        # sender whose domain is not recognized by _merchant_family. These
+        # messages already belong to the VERIFIED tracking/order thread: allow
+        # clear merchant evidence in the subject (never courier proof emails).
+        from_subject = [
+            r for r in ranked
+            if not _delivery_proof_message(r)
+            and (r.get('remoteImages') or r.get('attachmentImages'))
+            and key in str(r.get('subject') or '').lower()
+            and _merchant_family(str(r.get('from') or '')) not in {
+                'shein' if key == 'temu' else 'temu'
+            }
+        ]
+        if from_subject:
+            return from_subject, [], f'{key}_subject_photo_fallback'
         return [], [], f'{key}_no_store_photo'
     # Preferred email is FIRST, not ONLY. No courier POD, no other merchant,
     # and no new unrelated inbox search.
