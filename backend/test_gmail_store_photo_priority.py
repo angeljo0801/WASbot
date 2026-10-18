@@ -171,6 +171,18 @@ assert backup == []
 assert fields(primary)[0] == ['correct_newest.jpg']
 assert rule == 'temu_latest_first'
 
+# An even newer VERIFIED Temu email with NO images is authoritative.
+# Never fall back to older purchase images, even if they are available.
+temu_latest_no_images = mail(
+    'temu-newest-without-images', 'Temu', 1500,
+    'Your Temu order update', [],
+)
+primary, backup, rule = select([*temu, mixed_newest, temu_latest_no_images], 'Temu')
+assert [m['id'] for m in primary] == ['temu-newest-without-images']
+assert backup == []
+assert fields(primary) == ([], [])
+assert rule == 'temu_latest_first'
+
 # A newer courier POD never outranks the merchant's newest item email.
 courier_new = mail('courier-new', 'GOFO', 1200,
                    'Delivered - Temu order', ['front_porch.jpg'], is_proof=True)
