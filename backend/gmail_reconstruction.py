@@ -910,6 +910,37 @@ def _select_primary_product_photo_source(
     return rows, [], 'all_verified_order_emails'
 
 
+def _photo_merchant_from_verified_records(records: list[dict[str, Any]]) -> str:
+    """Identify Temu/SHEIN from actual verified store mail, NOT arbitrary text.
+
+    The old store_name(records) scans all email bodies and returns Amazon
+    before Temu, so promotional text or a courier quoting Amazon can silently
+    misidentify a verified Temu/SHEIN message.
+    """
+    families = {
+        _merchant_family(str(row.get('from') or ''))
+        for row in records
+        # A Temu "order delivered" message includes actual product images.
+        # Never exclude the sender just because it is a delivery notification.
+        if not _COURIER_SENDER.search(str(row.get('from') or ''))
+    }
+    stores = families & {'temu', 'shein'}
+    if len(stores) == 1:
+        return 'Temu' if 'temu' in stores else 'SHEIN'
+    # Only consider a verified subject hint if no sender identifies a store.
+    if not stores:
+        subjects = {
+            shop for row in records if not _delivery_proof_message(row)
+            for shop in ('temu', 'shein')
+            if re.search(r'\b' + shop + r'\b',
+                         str(row.get('subject') or ''), flags=re.IGNORECASE)
+        }
+        if len(subjects) == 1:
+            return 'Temu' if 'temu' in subjects else 'SHEIN'
+    return store_name(records)
+
+
+
 def _source_photo_fields(
     rows: list[dict[str, Any]],
 ) -> tuple[list[str], list[dict[str, Any]]]:
