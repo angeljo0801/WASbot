@@ -929,15 +929,16 @@ def _select_primary_product_photo_source(
     key = merchant.strip().lower()
 
     if key == 'temu':
-        # STRICT merchant selection: choose the MOST RECENT verified Temu
-        # MESSAGE, not the most recent one with usable pictures. A newer email
-        # with no images is still authoritative: NEVER use an older receipt's
-        # merchandise just because the newer message has broken/zero images.
-        # Sender aliases with Temu in the subject are accepted only from the
-        # already verified tracking/order/thread set provided by reconstruct().
+        # Use the NEWEST verified Temu email even if its subject says
+        # "delivered" or it contains delivery photos. Temu embeds the
+        # purchased-item thumbnail under "Package info" IN THAT SAME EMAIL.
+        # Previous code excluded those messages as delivery proof and selected
+        # the wrong, older order receipt instead. Only courier-sent POD emails
+        # are excluded, not delivery emails SENT BY TEMU.
+        # Verification of tracking/order/thread happened before this function.
         candidates = [
             row for row in records
-            if not _delivery_proof_message(row)
+            if not _COURIER_SENDER.search(str(row.get('from') or ''))
             and (
                 _merchant_family(str(row.get('from') or '')) == 'temu'
                 or (
@@ -1019,7 +1020,10 @@ def _photo_merchant_from_verified_records(records: list[dict[str, Any]]) -> str:
     """
     families = {
         _merchant_family(str(row.get('from') or ''))
-        for row in records if not _delivery_proof_message(row)
+        for row in records
+        # A Temu "order delivered" message includes actual product images.
+        # Never exclude the sender just because it is a delivery notification.
+        if not _COURIER_SENDER.search(str(row.get('from') or ''))
     }
     stores = families & {'temu', 'shein'}
     if len(stores) == 1:
@@ -1185,7 +1189,15 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
             for row in fallback_rows
         ],
         'emailPhotoUrls': urls[:60],
-        'deliveryPhotoUrls': _delivery_photo_urls(records),
+        # A retailer's delivered email mixes doorstep evidence with a real
+        # "Package info" product picture. Do not mark ALL pictures from that
+        # merchant email as POD: that hides the actual purchased item in the
+        # phone's product-image classifier. Courier-only proofs keep their flag.
+        'deliveryPhotoUrls': _delivery_photo_urls(
+            [row for row in records
+             if (merchant.lower() != 'temu'
+                 or _COURIER_SENDER.search(str(row.get('from') or '')))]
+        ),
         'emailAttachmentImages': attachments[:60],
         'emailSubjects': [str(r.get('subject') or '') for r in records if r.get('subject')],
         'emailFrom': [str(r.get('from') or '') for r in records if r.get('from')],
