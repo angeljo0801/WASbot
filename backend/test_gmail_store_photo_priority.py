@@ -1,221 +1,116 @@
-"""Regression tests for retailer-specific Gmail product photo email priority.
+"""Regression: SHEIN and Temu use the SAME general verified Gmail search.
 
-No Gmail credentials, private messages, or live requests needed.
+No live Gmail credentials or private mailbox access are needed.
 """
 import ast
 import re
 from pathlib import Path
 from typing import Any
 
-code = Path(__file__).with_name('gmail_reconstruction.py').read_text(encoding='utf-8')
+code = Path(__file__).with_name("gmail_reconstruction.py").read_text(encoding="utf-8")
 tree = ast.parse(code)
-wanted = {'_shein_predelivery_notice', '_rank_product_photo_messages',
-          '_select_primary_product_photo_source', '_source_photo_fields',
-          '_photo_merchant_from_verified_records'}
-nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
-assert len(nodes) == 5
-scope = {
-    'Any': Any,
-    'store_name': lambda rows: 'Amazon',  # Mimic misleading body-text detection.
-    're': re,
-    '_COURIER_SENDER': re.compile(r'(?i)(?:gofo|speedx|fedex|ontrac|ups\.com|usps|dhl)'),
-    '_merchant_family': lambda sender: next(
-        (x for x in ('shein', 'temu') if x in sender.lower()), ''
-    ),
-    '_delivery_proof_message': lambda row: (
-        row.get('isProof') is True
-    ),
+wanted = {
+    "_rank_product_photo_messages",
+    "_select_primary_product_photo_source",
+    "_source_photo_fields",
+    "_photo_merchant_from_verified_records",
 }
-exec(compile(ast.Module(body=nodes, type_ignores=[]), 'photo_priority', 'exec'), scope)
-rank = scope['_rank_product_photo_messages']
-select = scope['_select_primary_product_photo_source']
-fields = scope['_source_photo_fields']
-pre = scope['_shein_predelivery_notice']
-merchant = scope['_photo_merchant_from_verified_records']
+nodes = [
+    node for node in tree.body
+    if isinstance(node, ast.FunctionDef) and node.name in wanted
+]
+assert len(nodes) == len(wanted)
+scope = {
+    "Any": Any,
+    "re": re,
+    "_COURIER_SENDER": re.compile(
+        r"(?i)(?:gofo|speedx|fedex|ontrac|ups\.com|usps|dhl)"
+    ),
+    "_merchant_family": lambda sender: next(
+        (shop for shop in ("shein", "temu") if shop in sender.lower()), ""
+    ),
+    "_delivery_proof_message": lambda row: row.get("isProof") is True,
+    "store_name": lambda rows: "Amazon",
+}
+exec(
+    compile(ast.Module(body=nodes, type_ignores=[]), "general_email_photos", "exec"),
+    scope,
+)
+rank = scope["_rank_product_photo_messages"]
+select = scope["_select_primary_product_photo_source"]
+fields = scope["_source_photo_fields"]
+merchant = scope["_photo_merchant_from_verified_records"]
 
-def mail(key, shop, date, subject, images=None, is_proof=False):
+
+def mail(identifier, shop, millis, subject, urls=(), proof=False):
     return {
-        'id': key, 'accountId': 1, 'internalDate': date,
-        'from': f'{shop} <support@{shop.lower()}.com>',
-        'subject': subject,
-        'remoteImages': images or [],
-        'attachmentImages': [],
-        'isProof': is_proof,
+        "id": identifier,
+        "accountId": 1,
+        "internalDate": millis,
+        "from": f"{shop} <support@{shop.lower()}.com>",
+        "subject": subject,
+        "remoteImages": list(urls),
+        "attachmentImages": [],
+        "isProof": proof,
     }
 
+
 shein = [
-    mail('shein-order', 'SHEIN', 100, 'Order confirmation', ['dress.jpg']),
-    mail('shein-pre', 'SHEIN', 200, 'Notificación previa a la entrega de Pedido de SHEIN', ['watch.jpg']),
-    mail('shein-newer', 'SHEIN', 300, 'Order on its way', ['ad.jpg']),
-    mail('courier', 'GOFO', 400, 'Delivered', ['porch.jpg'], is_proof=True),
+    mail("shein-early", "SHEIN", 100, "Order placed", ["watch.jpg"]),
+    mail("shein-pre", "SHEIN", 200,
+         "Notificación previa a la entrega de Pedido de SHEIN",
+         ["dress.jpg"]),
+    mail("shein-latest", "SHEIN", 300, "Order shipped", ["shoes.jpg"]),
+    mail("shein-no-photos", "SHEIN", 400, "Delivered", []),
 ]
-assert pre(shein[1])
-assert not pre(shein[0])
-ranked, rule = rank(shein, 'SHEIN')
-assert rule == 'shein_predelivery_first', rule
-assert [x['id'] for x in ranked] == ['shein-pre', 'shein-order', 'shein-newer', 'courier']
-
-# Without a pre-delivery message, the earliest SHEIN email has priority,
-# but all verified product images are still available.
-fallback = [x for x in shein if x['id'] != 'shein-pre']
-ranked, rule = rank(fallback, 'SHEIN')
-assert [x['id'] for x in ranked] == ['shein-order', 'shein-newer', 'courier']
-assert rule == 'shein_predelivery_first'
-
 temu = [
-    mail('temu-old', 'Temu', 100, 'Order confirmed', ['older_product.jpg']),
-    mail('temu-last', 'Temu', 300, 'Your order has shipped', ['latest_product.jpg']),
-    # Real Sep 25 Temu email: delivery pictures AND the product in Package info.
-    mail('temu-pod', 'Temu', 400, 'Your Temu order delivered notification',
-         ['house.jpg', 'doorstep.jpg', 'tracking_label.jpg', 'shirt.jpg'],
-         is_proof=True),
-    mail('carrier', 'GOFO', 500, 'Delivered', ['address.jpg'], is_proof=True),
-    mail('other-shop', 'SHEIN', 600, 'A different shop', ['unrelated.jpg']),
-]
-ranked, rule = rank(temu, 'Temu')
-assert rule == 'temu_latest_first'
-assert [x['id'] for x in ranked] == [
-    'temu-last', 'temu-old', 'other-shop', 'carrier', 'temu-pod'
-], [x['id'] for x in ranked]
-
-# Unknown merchants preserve original (newest first) behavior.
-ranked, rule = rank(shein, 'Amazon')
-assert rule == 'recent_first'
-assert [x['id'] for x in ranked] == [
-    'courier', 'shein-newer', 'shein-pre', 'shein-order'
+    mail("temu-early", "Temu", 100, "Order placed", ["shirt.jpg"]),
+    mail("temu-latest", "Temu", 300,
+         "Your Temu order delivered notification",
+         ["house.jpg", "door.jpg", "package_info_shirt.jpg"]),
+    mail("temu-courier", "GOFO", 400, "Proof of delivery", ["porch.jpg"], True),
 ]
 
-# One missing preferred image shouldn't block fallback to older valid mail.
-ranked, rule = rank([x for x in temu if x['id'] != 'temu-last'], 'Temu')
-assert ranked[0]['id'] == 'temu-old'
+for shop, rows, images, expected in (
+    ("SHEIN", shein, ["shoes.jpg", "dress.jpg", "watch.jpg"],
+     ["shein-latest", "shein-pre", "shein-early"]),
+    ("Temu", temu,
+     ["porch.jpg", "house.jpg", "door.jpg", "package_info_shirt.jpg", "shirt.jpg"],
+     ["temu-courier", "temu-latest", "temu-early"]),
+):
+    ranked, ranking = rank(rows, shop)
+    selected, backup, rule = select(rows, shop)
+    assert ranking == "recent_first", (shop, ranking)
+    assert rule == "all_verified_order_emails", (shop, rule)
+    assert backup == [], (shop, backup)
+    assert [row["id"] for row in selected] == expected, (shop, selected)
+    assert fields(selected)[0] == images, (shop, fields(selected))
 
-
-# SHEIN: choose only its pre-delivery email. Do not combine its watch with
-# the dress/order confirmation or the newer promotional email.
-primary, backup, rule = select(shein, 'SHEIN')
-assert rule == 'shein_predelivery_first'
-assert [m['id'] for m in primary] == ['shein-pre']
-assert [m['id'] for m in backup] == ['shein-order', 'shein-newer']
-assert fields(primary) == (['watch.jpg'], [])
-assert all('porch.jpg' not in fields([m])[0] for m in backup)
-
-# If no pre-delivery email exists, SHEIN uses its oldest email with images.
-primary, backup, rule = select([m for m in shein if m['id'] != 'shein-pre'], 'SHEIN')
-assert [m['id'] for m in primary] == ['shein-order']
-assert [m['id'] for m in backup] == ['shein-newer']
-assert fields(primary) == (['dress.jpg'], [])
-
-# General Temu search: use photos from ALL verified related Gmail messages.
-# The real delivery email also has the "Package info" product thumbnail.
-primary, backup, rule = select(temu, 'Temu')
-assert rule == 'all_verified_order_emails'
-assert backup == []
-assert [m['id'] for m in primary] == [
-    'other-shop', 'carrier', 'temu-pod', 'temu-last', 'temu-old'
+# The SHEIN pre-delivery mail is NOT specially prioritized and never excludes
+# other matching messages. Images from all related verified messages survive.
+selected, backup, rule = select(
+    [shein[1], shein[0], shein[2]], "SHEIN"
+)
+assert [row["id"] for row in selected] == [
+    "shein-latest", "shein-pre", "shein-early"
 ]
-urls, attachments = fields(primary)
-assert not attachments
-for expected in ('shirt.jpg', 'house.jpg', 'older_product.jpg',
-                 'latest_product.jpg'):
-    assert expected in urls
+assert fields(selected)[0] == ["shoes.jpg", "dress.jpg", "watch.jpg"]
 
-# Multiple Temu emails with product photos are all eligible for the existing
-# client-side OCR/review -- not replaced by only the newest message.
-repeated = [
-    mail('temu-two', 'Temu', 650, 'Order details',
-         ['latest_product.jpg', 'another.jpg']),
-    *temu,
-]
-primary, backup, rule = select(repeated, 'Temu')
-assert len(primary) == len(repeated)
-assert backup == [] and rule == 'all_verified_order_emails'
-assert 'another.jpg' in fields(primary)[0]
+# Removing special rules does not break store identification from verified
+# merchant senders when an email body mentions unrelated online retailers.
+assert merchant([{
+    **shein[0], "body": "Amazon Temu Walmart promotional text",
+}]) == "SHEIN"
+assert merchant([{
+    **temu[0], "body": "Amazon SHEIN promotional text",
+}]) == "Temu"
 
-# A latest email with no photos must not suppress available older pictures.
-no_images = mail('temu-latest-empty', 'Temu', 1500,
-                 'Your Temu order update', [])
-primary, backup, rule = select([*temu, no_images], 'Temu')
-assert len(primary) == len(temu)
-assert 'shirt.jpg' in fields(primary)[0]
-assert backup == [] and rule == 'all_verified_order_emails'
-
-# Courier pictures are still classified downstream with independent metadata.
-only_courier = [m for m in temu if m['id'] == 'carrier']
-primary, backup, rule = select(only_courier, 'Temu')
-assert [m['id'] for m in primary] == ['carrier']
-assert backup == [] and rule == 'all_verified_order_emails'
-
-other_rows, backup, rule = select(shein, 'Amazon')
-assert [m['id'] for m in other_rows] == ['shein-newer', 'shein-pre', 'shein-order']
-assert rule == 'all_verified_emails'
-
-# Store mail via alternate sender still supplies product photos when the
-# verified tracking/order subject identifies the retailer.
-alternate = mail('shein-alias', 'Order Updates', 700,
-                 'SHEIN order details for your shipment', ['watch_from_alias.jpg'])
-primary, backup, rule = select([alternate], 'SHEIN')
-assert [m['id'] for m in primary] == ['shein-alias']
-assert rule == 'shein_subject_photo_fallback'
-assert fields(primary)[0] == ['watch_from_alias.jpg']
-# Alternate sender respects SHEIN's pre-delivery / oldest preference as well.
-alias_new = mail('shein-alias-new', 'Order Updates', 900,
-                 'SHEIN shipment notice', ['newer_alias.jpg'])
-alias_pre = mail('shein-alias-pre', 'Order Updates', 800,
-                 'Notificación previa a la entrega de Pedido de SHEIN',
-                 ['watch_alias.jpg'])
-primary, backup, rule = select([alternate, alias_new, alias_pre], 'SHEIN')
-assert [m['id'] for m in primary] == ['shein-alias-pre']
-assert [m['id'] for m in backup] == ['shein-alias', 'shein-alias-new']
-assert fields(primary)[0] == ['watch_alias.jpg']
-primary, backup, rule = select([alternate, alias_new], 'SHEIN')
-assert [m['id'] for m in primary] == ['shein-alias']
-assert [m['id'] for m in backup] == ['shein-alias-new']
-
-# Temu aliases belonging to a verified order are also included in general.
-alias_temu_early = mail('temu-alias-old', 'Order Updates', 100,
-                        'Temu order', ['old_alias_temu.jpg'])
-alias_temu_new = mail('temu-alias-new', 'Order Updates', 200,
-                      'Temu shipped', ['new_alias_temu.jpg'])
-primary, backup, rule = select([alias_temu_early, alias_temu_new], 'Temu')
-assert fields(primary)[0] == ['new_alias_temu.jpg', 'old_alias_temu.jpg']
-assert backup == [] and rule == 'all_verified_order_emails'
-
-# A Temu email might mention "Amazon" inside a promotional footer.
-# Store identity must come from actual Temu sender or verified subject.
-confirmed_temu = mail('new-temu', 'Temu', 1800, 'Temu order update',
-                       ['temu_latest_item.jpg'])
-confirmed_temu['body'] = 'Other brands include Amazon Walmart and SHEIN.'
-assert merchant([confirmed_temu]) == 'Temu'
-assert select([confirmed_temu], merchant([confirmed_temu]))[0][0]['id'] == 'new-temu'
-alias_temu = mail('new-temu-alias', 'Order Updates', 1900,
-                  'Temu order update', ['alias_item.jpg'])
-alias_temu['body'] = 'Amazon Walmart footer'
-assert merchant([alias_temu]) == 'Temu'
-# Do not infer Temu only because a courier writes it in the delivery body.
-carrier_brand = mail('courier-brand', 'GOFO', 2000, 'Delivered',
-                     ['porch.jpg'], is_proof=True)
-carrier_brand['body'] = 'Temu package delivered'
-assert merchant([carrier_brand]) != 'Temu'
-
-# Regression: marking every image inside a Temu delivery notice as courier
-# proof would reject the purchased shirt even after selecting the right email.
-assert "merchant.lower() != 'temu'" in code
-assert "_COURIER_SENDER.search(str(row.get('from') or ''))" in code
-
-# Do not accidentally accept another merchant or delivery-proof photo.
-unrelated = mail('other', 'Order Updates', 705, 'Temu special offer', ['other.jpg'])
-primary, _, rule = select([unrelated], 'SHEIN')
-assert primary == [] and rule == 'shein_no_store_photo'
-proof = mail('proof', 'Order Updates', 710, 'SHEIN delivery photo', ['porch.jpg'], is_proof=True)
-primary, _, rule = select([proof], 'SHEIN')
-assert primary == [] and rule == 'shein_no_store_photo'
-
-assert "'photoSourceRule': photo_rule" in code
-assert "'photoSearchScope': (" in code
-assert "'single_priority_email'" in code
-assert "'photoSourceMessageId':" in code
-assert "return general, [], 'all_verified_order_emails'" in code
-assert "'single_priority_email' if merchant.strip().lower() == 'shein'" in code
-
+# Strict regression: these old settings must no longer appear in the backend.
+assert "_shein_predelivery_notice" not in code
+assert "shein_predelivery_first" not in code
+assert "shein_subject_photo_fallback" not in code
+assert "'single_priority_email'" not in code
+assert "'photoSearchScope': 'all_verified_order_emails'" in code
+assert "result.pop('_photoFallbackGroups', None)" in code
 assert "'emailPhotoUrls': urls[:60]" in code
-print('SHEIN priority and restored broad Temu Gmail photo search passed.')
+print("General verified Gmail photo search passed for SHEIN and Temu.")
