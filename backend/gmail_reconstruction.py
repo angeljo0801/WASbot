@@ -251,6 +251,38 @@ def _delivery_photo_urls(records: list[dict[str, Any]]) -> list[str]:
     return urls
 
 
+def _temu_delivery_section_photos(html_parts: list[str]) -> tuple[list[str], list[str]]:
+    """Separate delivery proof from the product below Temu's Package info.
+
+    The user-provided Temu delivery email displays house/door/address images,
+    then a 'Package info' heading followed by the bought shirt. Both types
+    belong to ONE email; marking the whole email as POD loses the shirt.
+    If no explicit section boundary exists, leave images unclassified.
+    """
+    proof: list[str] = []
+    products: list[str] = []
+    for source in html_parts:
+        normalized = strip_html(source).lower()
+        if not re.search(r'\bpackage\s+info\b', normalized):
+            continue
+        for match in re.finditer(r"""(?is)<img\b[^>]*\bsrc\s*=\s*["']([^"']+)""", source):
+            url = html.unescape(match.group(1).strip())
+            if not url.startswith('http'):
+                continue
+            before = strip_html(source[:match.start()]).lower()
+            product_heading = list(re.finditer(r'\bpackage\s+info\b', before))
+            ship_heading = list(re.finditer(r'\bship\s+to\b', before))
+            product_start = product_heading[-1].start() if product_heading else -1
+            ship_start = ship_heading[-1].start() if ship_heading else -1
+            if product_start >= 0 and ship_start < product_start:
+                if url not in products:
+                    products.append(url)
+            elif product_start < 0:
+                if url not in proof:
+                    proof.append(url)
+    return proof, products
+
+
 def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
     # Keep the phone fast: eliminate unmistakable tracking/social assets before
     # any download, then prepare the remaining remote images concurrently.
@@ -266,6 +298,7 @@ def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
             break
 
     delivery_urls = set(result.get('deliveryPhotoUrls') or [])
+    product_urls = set(result.get('productPhotoUrls') or [])
     remote_rows: list[dict[str, Any]] = []
     workers = max(1, min(10, len(remote_urls)))
     if remote_urls:
@@ -286,6 +319,7 @@ def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
                     # A slow/broken CDN image must never block the reconstruction.
                     pass
                 row['deliveryProofHint'] = url in delivery_urls
+                row['productRowHint'] = url in product_urls
                 prepared_by_url[url] = row
             # Preserve Gmail order even though downloads completed in parallel.
             remote_rows = [prepared_by_url[url] for url in remote_urls if url in prepared_by_url]
@@ -315,6 +349,7 @@ def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
         seen.add(url)
         row['kind'] = 'attachment'
         row['deliveryProofHint'] = url in delivery_urls
+        row['productRowHint'] = url in product_urls
         row['originalUrl'] = url
         name = Path(str(row.get('name') or Path(url).name)).name
         path = MEDIA_DIR / name
@@ -555,6 +590,14 @@ def record(message: dict[str, Any], token: str, account_id: int, source_email: s
 
     for image in images:
         image['sourceEmail'] = source_email
+    message_sender = header(payload, 'From')
+    message_subject = header(payload, 'Subject')
+    proof_urls: list[str] = []
+    product_urls: list[str] = []
+    if ('temu' in message_sender.lower()
+            and re.search(r'(?i)\b(?:delivered|entregado)\b',
+                          message_subject + '\n' + body[:400])):
+        proof_urls, product_urls = _temu_delivery_section_photos(html_parts)
     return {
         'id': str(message.get('id') or ''),
         'threadId': str(message.get('threadId') or ''),
@@ -566,6 +609,8 @@ def record(message: dict[str, Any], token: str, account_id: int, source_email: s
         'date': header(payload, 'Date'),
         'body': body,
         'remoteImages': remote_images(html_parts),
+        'sectionDeliveryPhotoUrls': proof_urls,
+        'sectionProductPhotoUrls': product_urls,
         # Tracking is sometimes present only inside HTML button/link hrefs.
         # strip_html removes those hrefs, so retain them for match validation.
         'linkTargets': [
@@ -1169,11 +1214,20 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         # "Package info" product picture. Do not mark ALL pictures from that
         # merchant email as POD: that hides the actual purchased item in the
         # phone's product-image classifier. Courier-only proofs keep their flag.
-        'deliveryPhotoUrls': _delivery_photo_urls(
-            [row for row in records
-             if (merchant.lower() != 'temu'
-                 or _COURIER_SENDER.search(str(row.get('from') or '')))]
-        ),
+        'deliveryPhotoUrls': list(dict.fromkeys(
+            _delivery_photo_urls(
+                [row for row in records
+                 if (merchant.lower() != 'temu'
+                     or _COURIER_SENDER.search(str(row.get('from') or '')))]
+            ) + [
+                url for row in records
+                for url in row.get('sectionDeliveryPhotoUrls') or []
+            ]
+        )),
+        'productPhotoUrls': list(dict.fromkeys(
+            url for row in records
+            for url in row.get('sectionProductPhotoUrls') or []
+        )),
         'emailAttachmentImages': attachments[:60],
         'emailSubjects': [str(r.get('subject') or '') for r in records if r.get('subject')],
         'emailFrom': [str(r.get('from') or '') for r in records if r.get('from')],
