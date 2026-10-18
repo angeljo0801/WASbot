@@ -385,6 +385,7 @@ def _run_reconstruction_job(job_id: str, order: str, tracking: str, client_id: s
                     result['emailAttachmentImages'] = fallback['emailAttachmentImages']
                     result['emailPhotoCandidates'] = prepared
                     result['photoSourceRule'] += '_fallback'
+                    result['photoSourceMessageId'] = fallback['messageId']
                     break
         else:
             result.pop('_photoFallbackGroups', None)
@@ -916,11 +917,13 @@ def _rank_product_photo_messages(
 def _select_primary_product_photo_source(
     records: list[dict[str, Any]], merchant: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
-    """Collect photos from ALL verified order emails, in merchant preference order.
+    """Choose ONE photo-source email for SHEIN/Temu; keep ordered backups.
 
-    Records were already matched by tracking or by same mailbox plus verified
-    order/thread. Do not restrict the search to a single email; the app
-    decides which pictures show a product and which remain for review.
+    The tracking search still examines all verified order emails for matching
+    and metadata. Product photos, however, must come from a single message:
+    SHEIN's pre-delivery notice (otherwise its earliest product email), or
+    Temu's newest product email. Other verified store messages are fallbacks
+    ONLY if the selected message has no recoverable images. Never merge them.
     """
     ranked, rule = _rank_product_photo_messages(records, merchant)
     key = merchant.strip().lower()
@@ -949,12 +952,28 @@ def _select_primary_product_photo_source(
                 'shein' if key == 'temu' else 'temu'
             }
         ]
-        if from_subject:
-            return from_subject, [], f'{key}_subject_photo_fallback'
-        return [], [], f'{key}_no_store_photo'
-    # Preferred email is FIRST, not ONLY. No courier POD, no other merchant,
-    # and no new unrelated inbox search.
-    return matches, [], rule
+        if not from_subject:
+            return [], [], f'{key}_no_store_photo'
+        # Alternate sender must obey the same per-store date/subject rule.
+        if key == 'shein':
+            matches = sorted(
+                from_subject,
+                key=lambda r: (
+                    0 if _shein_predelivery_notice(r) else 1,
+                    int(r.get('internalDate') or 0),
+                ),
+            )
+        else:
+            matches = sorted(
+                from_subject,
+                key=lambda r: int(r.get('internalDate') or 0),
+                reverse=True,
+            )
+        rule = f'{key}_subject_photo_fallback'
+
+    # Exactly ONE email supplies product photos. The remainder is an ordered
+    # retry list for missing/unrecoverable photos, not a gallery to concatenate.
+    return matches[:1], matches[1:], rule
 
 
 
@@ -1039,8 +1058,8 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         if carrier not in carriers:
             carriers.append(carrier)
 
-    # Restrict product images to the chosen email, not every related email.
-    # Keep other verified messages for order metadata and last-email status.
+    # Search/metadata may span all verified tracking messages, but for SHEIN
+    # and Temu extract product images from just ONE prioritized store email.
     merchant = store_name(records)
     photo_rows, fallback_rows, photo_rule = _select_primary_product_photo_source(
         records, merchant,
@@ -1073,7 +1092,13 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         'items': items(combined),
         'photoSourceRule': photo_rule,
         'photoSourceMessageCount': len(photo_rows),
-        'photoSearchScope': 'all_verified_order_emails',
+        'photoSearchScope': (
+            'single_priority_email' if merchant.strip().lower() in {'shein', 'temu'}
+            else 'all_verified_order_emails'
+        ),
+        'photoSourceMessageId': (
+            str(photo_rows[0].get('id') or '') if len(photo_rows) == 1 else ''
+        ),
         # Never expose these alternative images as normal photo candidates.
         # They are considered only if the primary email yielded zero images.
         '_photoFallbackGroups': [
