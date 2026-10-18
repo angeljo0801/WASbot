@@ -1009,6 +1009,35 @@ def _select_primary_product_photo_source(
 
 
 
+
+def _photo_merchant_from_verified_records(records: list[dict[str, Any]]) -> str:
+    """Identify Temu/SHEIN from actual verified store mail, NOT arbitrary text.
+
+    The old store_name(records) scans all email bodies and returns Amazon
+    before Temu, so promotional text or a courier quoting Amazon can silently
+    disable Temu's strict newest-mail policy and mix photos from every email.
+    """
+    families = {
+        _merchant_family(str(row.get('from') or ''))
+        for row in records if not _delivery_proof_message(row)
+    }
+    stores = families & {'temu', 'shein'}
+    if len(stores) == 1:
+        return 'Temu' if 'temu' in stores else 'SHEIN'
+    # Only consider a verified subject hint if no sender identifies a store.
+    if not stores:
+        subjects = {
+            shop for row in records if not _delivery_proof_message(row)
+            for shop in ('temu', 'shein')
+            if re.search(r'\b' + shop + r'\b',
+                         str(row.get('subject') or ''), flags=re.IGNORECASE)
+        }
+        if len(subjects) == 1:
+            return 'Temu' if 'temu' in subjects else 'SHEIN'
+    return store_name(records)
+
+
+
 def _source_photo_fields(
     rows: list[dict[str, Any]],
 ) -> tuple[list[str], list[dict[str, Any]]]:
@@ -1091,7 +1120,7 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
 
     # Search/metadata may span all verified tracking messages, but for SHEIN
     # and Temu extract product images from just ONE prioritized store email.
-    merchant = store_name(records)
+    merchant = _photo_merchant_from_verified_records(records)
     photo_rows, fallback_rows, photo_rule = _select_primary_product_photo_source(
         records, merchant,
     )
@@ -1119,7 +1148,7 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         'found': bool(records),
         'query': seed,
         'clientId': client_id.strip(),
-        'store': store_name(records),
+        'store': merchant,
         'orderNumber': order_number(combined, order),
         'trackingNumbers': tracks,
         'carrier': carriers[0] if carriers else carrier_for(tracking, combined),
