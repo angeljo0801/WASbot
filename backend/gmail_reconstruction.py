@@ -917,47 +917,27 @@ def _rank_product_photo_messages(
 def _select_primary_product_photo_source(
     records: list[dict[str, Any]], merchant: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
-    """Choose ONE photo-source email for SHEIN/Temu; keep ordered backups.
+    """SHEIN keeps its one-email priority; Temu uses all verified emails.
 
-    The tracking search still examines all verified order emails for matching
-    and metadata. Product photos, however, must come from a single message:
-    SHEIN's pre-delivery notice (otherwise its earliest product email), or
-    Temu's newest product email. Other verified store messages are fallbacks
-    ONLY if the selected message has no recoverable images. Never merge them.
+    Tracking/order/thread validation is done before calling this function.
+    For Temu gather images across the matched email set, without selecting
+    a latest-only email or falling back to cached previous photo galleries.
     """
     ranked, rule = _rank_product_photo_messages(records, merchant)
     key = merchant.strip().lower()
 
     if key == 'temu':
-        # Use the NEWEST verified Temu email even if its subject says
-        # "delivered" or it contains delivery photos. Temu embeds the
-        # purchased-item thumbnail under "Package info" IN THAT SAME EMAIL.
-        # Previous code excluded those messages as delivery proof and selected
-        # the wrong, older order receipt instead. Only courier-sent POD emails
-        # are excluded, not delivery emails SENT BY TEMU.
-        # Verification of tracking/order/thread happened before this function.
-        candidates = [
-            row for row in records
-            if not _COURIER_SENDER.search(str(row.get('from') or ''))
-            and (
-                _merchant_family(str(row.get('from') or '')) == 'temu'
-                or (
-                    _merchant_family(str(row.get('from') or '')) == ''
-                    and re.search(r'\btemu\b',
-                                  str(row.get('subject') or ''),
-                                  flags=re.IGNORECASE)
-                )
-            )
-        ]
-        candidates.sort(
+        # RESTORED GENERAL SEARCH: collect photos from ALL verified related
+        # tracking/order emails, rather than one selected Temu notification.
+        # The phone's photo classifier handles product identification.
+        # The delivered message may contain both delivery and item photos.
+        general = sorted(
+            [row for row in records
+             if row.get('remoteImages') or row.get('attachmentImages')],
             key=lambda row: int(row.get('internalDate') or 0),
             reverse=True,
         )
-        return (
-            candidates[:1],
-            [],  # Critical: NO older-email image fallback for Temu.
-            'temu_latest_first' if candidates else 'temu_no_store_photo',
-        )
+        return general, [], 'all_verified_order_emails'
 
     if key not in {'shein', 'temu'}:
         # Avoid courier delivery-proof photos, even for other shops.
@@ -1122,8 +1102,8 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         if carrier not in carriers:
             carriers.append(carrier)
 
-    # Search/metadata may span all verified tracking messages, but for SHEIN
-    # and Temu extract product images from just ONE prioritized store email.
+    # Search ALL related verified Gmail messages for Temu photos, as before.
+    # Only SHEIN retains its requested one-email priority.
     merchant = _photo_merchant_from_verified_records(records)
     photo_rows, fallback_rows, photo_rule = _select_primary_product_photo_source(
         records, merchant,
@@ -1134,13 +1114,9 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         # Report only aggregate selection diagnostics, no private email body,
         # subject, address or message id in logs.
         logger.info(
-            'Temu Gmail selected latest email: verified=%s chosenDate=%s '
-            'hasImages=%s selectedEmails=%s candidateEmails=%s',
-            bool(photo_rows),
-            selected_photo_row.get('internalDate', 0),
-            bool(urls or attachments),
-            len(photo_rows),
-            len(records),
+            'Temu Gmail general photo search: imageSourceEmails=%s '
+            'candidateEmails=%s hasImages=%s',
+            len(photo_rows), len(records), bool(urls or attachments),
         )
     source_emails: list[str] = []
     for row in reversed(records):
@@ -1170,7 +1146,7 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         'photoSourceRule': photo_rule,
         'photoSourceMessageCount': len(photo_rows),
         'photoSearchScope': (
-            'single_priority_email' if merchant.strip().lower() in {'shein', 'temu'}
+            'single_priority_email' if merchant.strip().lower() == 'shein'
             else 'all_verified_order_emails'
         ),
         'photoSourceMessageId': (
