@@ -119,7 +119,7 @@ assert fields(primary) == (['latest_product.jpg', 'another.jpg'], [])
 # Missing/broken photos may use the NEXT email as an entire replacement
 # (not a union of the first and second messages).
 assert fields(backup[:1]) == (['latest_product.jpg'], [])
-assert fields(primary + backup[:1]) != fields(primary)
+assert fields(primary + backup[-1:]) != fields(primary)
 
 only_courier = [m for m in temu if m['id'] in ('temu-pod', 'carrier')]
 primary, backup, rule = select(only_courier, 'Temu')
