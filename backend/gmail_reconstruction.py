@@ -300,8 +300,7 @@ def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         seen.add(url)
         remote_urls.append(url)
-        if len(remote_urls) >= 80:
-            break
+
 
     delivery_urls = set(result.get('deliveryPhotoUrls') or [])
     product_urls = set(result.get('productPhotoUrls') or [])
@@ -340,12 +339,11 @@ def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
             if shortest < 70 or (shortest > 0 and longest / shortest > 6.5):
                 continue
         candidates.append(row)
-        if len(candidates) >= 72:
-            break
+
 
     # Gmail MIME attachments are already local on Railway, so thumbnailing them
     # is cheap and they are kept ahead of the final cap when useful.
-    for raw in list(result.get('emailAttachmentImages') or [])[:20]:
+    for raw in list(result.get('emailAttachmentImages') or []):
         if not isinstance(raw, dict):
             continue
         row = dict(raw)
@@ -373,8 +371,7 @@ def _prepare_media_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
         else:
             row['thumbnailUrl'] = ''
         candidates.append(row)
-        if len(candidates) >= 80:
-            break
+
 
     # The same photo can appear in several order emails. Server thumbnails
     # are named by content digest. Collapse them before sending to the app so
@@ -866,7 +863,7 @@ def _refund_evidence(
         # Cancellations are not refunds unless this email says refund.
         subject = str(row.get('subject') or '')
         if not re.search(
-            r'\b(?:refund|refunded|reimburs|reembols|devoluci[oó]n)\b',
+            r'\b(?:refund(?:ed)?|reimburs\w*|reembols\w*|devoluci[oó]n)\b',
             subject, re.IGNORECASE,
         ):
             continue
@@ -1200,7 +1197,7 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         'photoSourceDate': str(selected_photo_row.get('date') or ''),
         'photoSourceInternalDate': int(selected_photo_row.get('internalDate') or 0),
         '_photoFallbackGroups': [],
-        'emailPhotoUrls': urls[:60],
+        'emailPhotoUrls': urls,
         # A retailer's delivered email mixes doorstep evidence with a real
         # "Package info" product picture. Do not mark ALL pictures from that
         # merchant email as POD: that hides the actual purchased item in the
@@ -1219,7 +1216,7 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
             url for row in records
             for url in row.get('sectionProductPhotoUrls') or []
         )),
-        'emailAttachmentImages': attachments[:60],
+        'emailAttachmentImages': attachments,
         'emailSubjects': [str(r.get('subject') or '') for r in records if r.get('subject')],
         'emailFrom': [str(r.get('from') or '') for r in records if r.get('from')],
         'lastEmailDate': str(records[-1].get('date') or '') if records else '',
