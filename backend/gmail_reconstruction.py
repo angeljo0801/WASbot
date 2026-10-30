@@ -816,12 +816,79 @@ def _is_refund_or_cancel_notice(row: dict[str, Any]) -> bool:
     ))
 
 
+def _refund_matches_known_products(
+    notice: dict[str, Any], known_items: list[dict[str, Any]],
+) -> list[str]:
+    """Match only identifiable products, never mark an entire refunded order.
+
+    A refund subject/footer alone is insufficient evidence for which item was
+    refunded. The notice body must mention the known item name with enough
+    discriminative words; otherwise leave the refund as order-level evidence.
+    """
+    body = str(notice.get('body') or '')
+    normalized = re.sub(r'[^a-z0-9]+', ' ', body.lower()).strip()
+    matches: list[str] = []
+    for item in known_items:
+        name = str(item.get('name') or '').strip()
+        tokens = [
+            token for token in re.findall(r'[a-z0-9]+', name.lower())
+            if len(token) >= 4 and token not in {
+                'item', 'order', 'size', 'color', 'black', 'white', 'blue',
+                'red', 'large', 'small', 'medium', 'pack', 'with', 'your',
+                'free', 'piece', 'pcs', 'shipped', 'delivery',
+            }
+        ]
+        if not tokens:
+            continue
+        # A full distinctive title is preferred. Short generic one-token
+        # matches (e.g. "shirt") are too ambiguous to label as refunded.
+        needle = ' '.join(re.findall(r'[a-z0-9]+', name.lower()))
+        exact = bool(len(needle) >= 10 and
+                     re.search(r'(?<![a-z0-9])' + re.escape(needle) +
+                               r'(?![a-z0-9])', normalized))
+        strong = len(set(tokens)) >= 2 and sum(
+            bool(re.search(r'\b' + re.escape(token) + r'\b', normalized))
+            for token in set(tokens)
+        ) >= max(2, int(len(set(tokens)) * 0.75))
+        if exact or strong:
+            matches.append(name)
+    return list(dict.fromkeys(matches))
+
+
+def _refund_evidence(
+    records: list[dict[str, Any]], known_items: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    notices: list[dict[str, Any]] = []
+    names: list[str] = []
+    for row in records:
+        if not _is_refund_or_cancel_notice(row):
+            continue
+        # Cancellations are not refunds unless this email says refund.
+        subject = str(row.get('subject') or '')
+        if not re.search(
+            r'\b(?:refund|refunded|reimburs|reembols|devoluci[oó]n)\b',
+            subject, re.IGNORECASE,
+        ):
+            continue
+        matched = _refund_matches_known_products(row, known_items)
+        names.extend(matched)
+        notices.append({
+            'subject': subject[:180],
+            'date': str(row.get('date') or ''),
+            'matchedItems': matched,
+            'itemIdentified': bool(matched),
+            # "Appears in a refund email" is not a verified bank settlement.
+            'status': 'mentioned_in_refund_email',
+        })
+    return notices, list(dict.fromkeys(names))
+
+
 def _is_related_to_requested_order(
     row: dict[str, Any], order_ref: str, tracking: str,
 ) -> bool:
     """An email sharing Gmail's thread id is NOT proof of the same order."""
-    if _is_refund_or_cancel_notice(row):
-        return False
+    # Refund emails are useful order-level evidence, but never trust a
+    # shared Gmail thread alone; require a matching order or tracking ID.
     if order_ref:
         # A quoted matching order in an otherwise distinct order message
         # must not pull its old product images into the current package.
@@ -1057,10 +1124,21 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
     records = list(unique.values())
     records.sort(key=lambda x: int(x.get('internalDate') or 0))
 
+    # Refund notices are not product-catalog emails: keep their evidence
+    # separately to avoid adding a bogus "refunded" merchandise item.
+    product_records = [
+        row for row in records if not _is_refund_or_cancel_notice(row)
+    ]
     combined = '\n'.join(
         f"{r.get('subject','')}\n{r.get('from','')}\n{r.get('body','')}"
         for r in records
     )
+    catalog_text = '\n'.join(
+        f"{r.get('subject','')}\n{r.get('body','')}"
+        for r in product_records
+    )
+    known_items = items(catalog_text)
+    refund_notices, refunded_names = _refund_evidence(records, known_items)
     tracks = tracking_numbers(combined)
     if tracking.strip() and all(x.upper() != tracking.strip().upper() for x in tracks):
         tracks.insert(0, tracking.strip())
@@ -1110,7 +1188,9 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         'discount': money_field(combined, ['discount', 'savings', 'descuento']),
         'total': money_field(combined, ['order total', 'grand total', 'total', 'total del pedido']),
         'currency': 'USD',
-        'items': items(combined),
+        'items': known_items,
+        'refundNotices': refund_notices,
+        'refundedItemNames': refunded_names,
         'photoSourceRule': photo_rule,
         'photoSourceMessageCount': len(photo_rows),
         'photoSearchScope': 'all_verified_order_emails',
