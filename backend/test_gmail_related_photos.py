@@ -25,7 +25,9 @@ assert parse_eta("Estimated delivery: Oct 20, 2026") == "Oct 20, 2026"
 source = (directory / "gmail_reconstruction.py").read_text(encoding="utf-8")
 tree = ast.parse(source)
 fn_names = {"_merchant_family", "_order_reference_for_related_messages",
-            "_related_purchase_records"}
+            "_related_purchase_records", "_is_refund_or_cancel_notice",
+            "_is_related_to_requested_order", "_compact_identifier",
+            "_identifier_in_record"}
 nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in fn_names]
 assert len(nodes) == len(fn_names)
 
@@ -57,12 +59,37 @@ messages = {
         "body": "Order #PO-9999999999",
         "remoteImages": ["https://img.temu.example/wrong.jpg"],
     },
+    "old-same-thread": {
+        "id": "old-same-thread", "threadId": "thread-temu",
+        "from": "Temu <support@temuemail.com>",
+        "subject": "Another Temu order delivered",
+        "body": "Order #PO-8888888888",
+        "remoteImages": ["https://img.temu.example/old-refunded-product.jpg"],
+    },
+    "refund-same-order": {
+        "id": "refund-same-order", "threadId": "thread-temu",
+        "from": "Temu <support@temuemail.com>",
+        "subject": "Your refund has been processed",
+        "body": "Order #PO-1234567890",
+        "remoteImages": ["https://img.temu.example/refunded.jpg"],
+    },
+    "quoted-different-order": {
+        "id": "quoted-different-order", "threadId": "thread-temu",
+        "from": "Temu <support@temuemail.com>",
+        "subject": "Order #PO-7777777777",
+        "body": "Order #PO-7777777777; Previous Order #PO-1234567890",
+        "remoteImages": ["https://img.temu.example/quoted-old.jpg"],
+    },
 }
 def gmail_json(path, token):
     assert token == "same-account-token"
     calls.append(path)
     if path.startswith("threads/"):
-        return {"messages": [messages["receipt-thread"], messages["foreign"]]}
+        return {"messages": [
+            messages["receipt-thread"], messages["foreign"],
+            messages["old-same-thread"], messages["refund-same-order"],
+            messages["quoted-different-order"],
+        ]}
     if path.startswith("messages?"):
         assert '"PO-1234567890"' in urllib.parse.parse_qs(
             path.split("?", 1)[1])["q"][0]
@@ -93,6 +120,15 @@ matched = [{
 added = scope["_related_purchase_records"](
     matched, "same-account-token", 1, "connected@example.test")
 assert {r["id"] for r in added} == {"receipt-thread", "receipt-order"}, added
+assert not any("old-refunded-product" in str(r.get("remoteImages")) for r in added)
+assert not any("refunded.jpg" in str(r.get("remoteImages")) for r in added)
+assert not any("quoted-old.jpg" in str(r.get("remoteImages")) for r in added)
+assert scope["_is_refund_or_cancel_notice"](
+    {"subject": "Your refund was processed", "body": "Order #PO-1234567890"})
+assert not scope["_is_refund_or_cancel_notice"](
+    {"subject": "Your order is delivered",
+     "body": "For help see the return policy and refund options"})
+
 assert all(r["accountId"] == 1 for r in added)
 assert any("threads/" in c for c in calls)
 assert any("messages?" in c for c in calls)
