@@ -14,6 +14,7 @@ wanted = {
     "_select_primary_product_photo_source",
     "_source_photo_fields",
     "_photo_merchant_from_verified_records",
+    "_is_refund_or_cancel_notice",
 }
 nodes = [
     node for node in tree.body
@@ -85,6 +86,15 @@ for shop, rows, images, expected in (
     assert backup == [], (shop, backup)
     assert [row["id"] for row in selected] == expected, (shop, selected)
     assert fields(selected)[0] == images, (shop, fields(selected))
+
+# A refunded historical message is not a photo source for a new package.
+refunded = mail(
+    "old-refunded", "Temu", 500,
+    "Refund processed for previous order", ["old_refunded_item.jpg"],
+)
+primary, backup, rule = select([*temu, refunded], "Temu")
+assert "old_refunded_item.jpg" not in fields(primary)[0]
+assert backup == [] and rule == "all_verified_order_emails"
 
 # The SHEIN pre-delivery mail is NOT specially prioritized and never excludes
 # other matching messages. Images from all related verified messages survive.
