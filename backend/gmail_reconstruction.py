@@ -798,8 +798,48 @@ def _merchant_family(sender: str) -> str:
     return ''
 
 
+def _is_refund_or_cancel_notice(row: dict[str, Any]) -> bool:
+    """Ignore refund/return notifications as merchandise-photo sources.
+
+    A standard order email might contain a footer saying "return policy",
+    so classify by the SUBJECT only (or an explicit refund-status heading),
+    not by casual mentions anywhere in a long purchase email.
+    """
+    subject = str(row.get('subject') or '').lower()
+    return bool(re.search(
+        r'\b(?:refund(?:ed)?|reimburs(?:ement|ed)|returned|'
+        r'return (?:approved|accepted|confirmed|completed|processed)|'
+        r'order cancel(?:led|ed)|cancel(?:led|ed) order|'
+        r'reembolso|reembolsad[oa]|devoluci[oó]n (?:aprobada|completada)|'
+        r'pedido cancelado)\b',
+        subject, re.IGNORECASE,
+    ))
+
+
+def _is_related_to_requested_order(
+    row: dict[str, Any], order_ref: str, tracking: str,
+) -> bool:
+    """An email sharing Gmail's thread id is NOT proof of the same order."""
+    if _is_refund_or_cancel_notice(row):
+        return False
+    if order_ref:
+        # A quoted matching order in an otherwise distinct order message
+        # must not pull its old product images into the current package.
+        candidate_order = order_number(
+            str(row.get('subject') or '') + '\n' +
+            str(row.get('body') or ''),
+        ).strip()
+        if (candidate_order and
+            _compact_identifier(candidate_order) != _compact_identifier(order_ref)):
+            return False
+        if _identifier_in_record(row, order_ref):
+            return True
+    return bool(tracking and _identifier_in_record(row, tracking))
+
+
 def _related_purchase_records(
-    matched: list[dict[str, Any]], token: str, account_id: int, source_email: str,
+    matched: list[dict[str, Any]], token: str, account_id: int,
+    source_email: str, tracking: str = '',
 ) -> list[dict[str, Any]]:
     """Add related purchase receipts without claiming unrelated mail is a match.
 
@@ -811,6 +851,11 @@ def _related_purchase_records(
         return []
     related: dict[str, dict[str, Any]] = {}
     existing = {str(row.get('id') or '') for row in matched}
+    reference = _order_reference_for_related_messages(matched)
+    if not reference and not tracking:
+        # Without a verified order ID or full tracking, a Gmail thread can
+        # contain multiple unrelated orders and refunded items.
+        return []
     family = next(
         (_merchant_family(str(r.get('from') or '')) for r in matched
          if _merchant_family(str(r.get('from') or ''))), '',
@@ -834,6 +879,8 @@ def _related_purchase_records(
                 candidate = record(msg, token, account_id, source_email)
                 if family and _merchant_family(str(candidate.get('from') or '')) != family:
                     continue
+                if not _is_related_to_requested_order(candidate, reference, tracking):
+                    continue
                 related[message_id] = candidate
                 if len(related) >= 25:
                     break
@@ -842,7 +889,6 @@ def _related_purchase_records(
             # failure that can hide valid tracking matches.
             continue
 
-    reference = _order_reference_for_related_messages(matched)
     if reference:
         try:
             listing = gmail_json('messages?' + urllib.parse.urlencode({
@@ -863,6 +909,8 @@ def _related_purchase_records(
                         continue
                     candidate = record(msg, token, account_id, source_email)
                     if family and _merchant_family(str(candidate.get('from') or '')) != family:
+                        continue
+                    if not _is_related_to_requested_order(candidate, reference, tracking):
                         continue
                     related[message_id] = candidate
                 except Exception:
@@ -889,7 +937,8 @@ def _rank_product_photo_messages(
     """
     images = [
         row for row in records
-        if row.get('remoteImages') or row.get('attachmentImages')
+        if (row.get('remoteImages') or row.get('attachmentImages'))
+        and not _is_refund_or_cancel_notice(row)
     ]
     images.sort(
         key=lambda row: int(row.get('internalDate') or 0),
@@ -992,7 +1041,7 @@ def reconstruct(order: str = '', tracking: str = '', client_id: str = '') -> dic
         for account_id, email, token in accounts:
             matched = [r for r in records if int(r.get('accountId') or 0) == account_id]
             if matched:
-                records.extend(_related_purchase_records(matched, token, account_id, email))
+                records.extend(_related_purchase_records(matched, token, account_id, email, seed))
 
     if account_errors and not records:
         raise HTTPException(
