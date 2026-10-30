@@ -122,5 +122,5 @@ assert "shein_subject_photo_fallback" not in code
 assert "'single_priority_email'" not in code
 assert "'photoSearchScope': 'all_verified_order_emails'" in code
 assert "result.pop('_photoFallbackGroups', None)" in code
-assert "'emailPhotoUrls': urls[:60]" in code
+assert "'emailPhotoUrls': urls," in code
 print("General verified Gmail photo search passed for SHEIN and Temu.")
