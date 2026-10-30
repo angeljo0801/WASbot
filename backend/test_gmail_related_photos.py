@@ -119,9 +119,11 @@ matched = [{
 }]
 added = scope["_related_purchase_records"](
     matched, "same-account-token", 1, "connected@example.test")
-assert {r["id"] for r in added} == {"receipt-thread", "receipt-order"}, added
+assert {r["id"] for r in added} == {"receipt-thread", "receipt-order", "refund-same-order"}, added
 assert not any("old-refunded-product" in str(r.get("remoteImages")) for r in added)
-assert not any("refunded.jpg" in str(r.get("remoteImages")) for r in added)
+assert any(r["id"] == "refund-same-order" for r in added)
+# Refund mail is kept as evidence, but the photo selector rejects it.
+assert "and not _is_refund_or_cancel_notice(row)" in source
 assert not any("quoted-old.jpg" in str(r.get("remoteImages")) for r in added)
 assert scope["_is_refund_or_cancel_notice"](
     {"subject": "Your refund was processed", "body": "Order #PO-1234567890"})
